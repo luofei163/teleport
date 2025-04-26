@@ -502,6 +502,10 @@ func (h *HeartbeatV2) onHeartbeat(err error) {
 	if h.onHeartbeatInner == nil {
 		return
 	}
+	if err := h.closeContext.Err(); err != nil {
+		h.onHeartbeatInner(err)
+		return
+	}
 	h.onHeartbeatInner(err)
 }
 

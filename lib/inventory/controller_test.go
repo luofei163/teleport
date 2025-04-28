@@ -638,6 +638,7 @@ func TestDatabaseServerBasics(t *testing.T) {
 	controller := NewController(
 		auth,
 		usagereporter.DiscardUsageReporter{},
+		withServerTTL(time.Millisecond*1000),
 		withServerKeepAlive(time.Millisecond*200),
 		withTestEventsChannel(events),
 		WithOnConnect(rc.onConnect),
@@ -712,6 +713,36 @@ func TestDatabaseServerBasics(t *testing.T) {
 		deny(dbUpsertErr, dbKeepAliveErr, handlerClose),
 	)
 
+	// re-upsert one db to trigger rate limiting for it.
+	for range 3 {
+		err := downstream.Send(ctx, proto.InventoryHeartbeat{
+			DatabaseServer: &types.DatabaseServerV3{
+				Metadata: types.Metadata{
+					Name: serverID,
+				},
+				Spec: types.DatabaseServerSpecV3{
+					HostID:   serverID,
+					Hostname: serverID,
+					Database: &types.DatabaseV3{
+						Kind:    types.KindDatabase,
+						Version: types.V3,
+						Metadata: types.Metadata{
+							Name: "db-0",
+						},
+						Spec: types.DatabaseSpecV3{},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	// upsert should fail for rate limit, but keepalive shouldn't
+	awaitEvents(t, events,
+		expect(dbUpsertOk, dbUpsertLimited, dbUpsertRetryOk, dbKeepAliveOk, dbKeepAliveOk),
+		deny(dbUpsertErr, dbKeepAliveErr, dbUpsertRetryErr, dbUpsertRetryLimitedErr, dbUpsertRetryLimited, handlerClose),
+	)
+
 	// set up to induce some failures, but not enough to cause the control
 	// stream to be closed.
 	auth.mu.Lock()
@@ -739,7 +770,7 @@ func TestDatabaseServerBasics(t *testing.T) {
 		deny(appKeepAliveErr, handlerClose),
 	)
 
-	for i := 0; i < dbCount; i++ {
+	for i := range dbCount {
 		err := downstream.Send(ctx, proto.InventoryHeartbeat{
 			DatabaseServer: &types.DatabaseServerV3{
 				Metadata: types.Metadata{
@@ -764,7 +795,7 @@ func TestDatabaseServerBasics(t *testing.T) {
 	// we should now see an upsert failure, but no additional
 	// keepalive failures, and the upsert should succeed on retry.
 	awaitEvents(t, events,
-		expect(dbUpsertErr, dbUpsertRetryOk),
+		expect(dbUpsertOk, dbUpsertOk, dbUpsertErr, dbUpsertRetryOk),
 		deny(dbKeepAliveErr, handlerClose),
 	)
 
@@ -1640,6 +1671,7 @@ func deny(events ...testEvent) eventOption {
 }
 
 func awaitEvents(t *testing.T, ch <-chan testEvent, opts ...eventOption) {
+	t.Helper()
 	options := eventOpts{
 		expect: make(map[testEvent]int),
 		deny:   make(map[testEvent]struct{}),

@@ -751,9 +751,12 @@ func (s *Server) copyDatabaseWithUpdatedLabelsLocked(database types.Database) *t
 func (s *Server) startHeartbeat(ctx context.Context, database types.Database) error {
 	heartbeat, err := srv.NewDatabaseServerHeartbeat(srv.HeartbeatV2Config[*types.DatabaseServerV3]{
 		InventoryHandle: s.cfg.InventoryHandle,
-		Announcer:       s.cfg.AccessPoint,
-		GetResource:     s.getServerInfoFunc(database),
-		OnHeartbeat:     s.cfg.OnHeartbeat,
+		// Announcer is provided to allow falling back to non-ICS heartbeats if
+		// the Auth server is older than the db service.
+		// TODO(gavin): DELETE IN 19.0.0
+		Announcer:   s.cfg.AccessPoint,
+		GetResource: s.getServerInfoFunc(database),
+		OnHeartbeat: s.cfg.OnHeartbeat,
 	})
 	if err != nil {
 		return trace.Wrap(err)

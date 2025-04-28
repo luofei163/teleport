@@ -52,8 +52,6 @@ type HeartbeatV2Config[T any] struct {
 
 	// Announcer is a fallback used to perform basic upsert-style heartbeats
 	// if the control stream is unavailable.
-	//
-	// DELETE IN: 11.0 (only exists for back-compat with v9 auth servers)
 	Announcer authclient.Announcer
 	// OnHeartbeat is a per-attempt callback (optional).
 	OnHeartbeat func(error)

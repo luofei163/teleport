@@ -95,7 +95,7 @@ new binaries being executed, or new Linux syscalls being called will require upd
 
 ### Installation and updating
 
-The module source will be embedded in future Teleport agent binaries.
+The module source will be embedded in future Teleport agent binaries. This will ensure that the module is always compatible with the installed version of Teleport.
 
 `teleport-update` will be modified to support managing SELinux modules for Teleport SSH. `teleport-update` will install the SELinux
 module if configured to, and will remove it if it was previously installed and the user specified that they don't want the module
@@ -104,6 +104,7 @@ the Teleport agent module is not installed, the `teleport-update` will extract t
 and `semodule` to compile and install the module. Directories and files that Teleport SSH requires will be created if they do not exist
 after the module is installed, so that they can be labeled correctly. If necessary files do not have the correct SELinux labels Teleport SSH
 will not be able to function properly.
+If `teleport-update` is unable to install the module, it will rollback to the module that was previously installed, if any.
 
 `teleport-update` will only manage the official Teleport SELinux module. Modules created by users or third parties will not be inspected or
 modified. If an SELinux module installed that shares a name with the official Teleport SELinux module it will be assumed to be a version of
@@ -119,6 +120,10 @@ The SELinux mode will not be modified by `teleport-update`, users will be respon
 
 The `teleport-update` will have a `--dry-run` flag added to the necessary subcommands that will print what actions it would need to take to
 manage the module if run normally and print the module that would be installed based on the provided Teleport agent configuration file.
+
+The following RPM packages will be required to install the SELinux module:
+- selinux-policy-devel
+- policycoreutils
 
 #### Examples
 

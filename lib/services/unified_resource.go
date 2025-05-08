@@ -66,7 +66,7 @@ type UnifiedResourceCache struct {
 	typeTree *btree.BTreeG[*item]
 	// resources is a map of all resources currently tracked in the tree
 	// the key is always name/type
-	resources       map[string]resource
+	resources       map[string]*resourceOrCollection
 	initializationC chan struct{}
 	stale           bool
 	once            sync.Once
@@ -98,7 +98,7 @@ func NewUnifiedResourceCache(ctx context.Context, cfg UnifiedResourceCacheConfig
 		typeTree: btree.NewG(cfg.BTreeDegree, func(a, b *item) bool {
 			return a.Less(b)
 		}),
-		resources:       make(map[string]resource),
+		resources:       make(map[string]*resourceOrCollection),
 		initializationC: make(chan struct{}),
 		ResourceGetter:  cfg.ResourceGetter,
 		cache:           lazyCache,
@@ -134,25 +134,22 @@ func (c *UnifiedResourceCache) putLocked(resource resource) {
 		// for the nameTree or typeTree change, remove the old entries
 		// from those trees before adding a new one. This can happen
 		// when a node's hostname changes
-		oldSortKey := makeResourceSortKey(oldResource)
+		oldSortKey := makeResourceSortKey(oldResource.get())
 		if oldSortKey.byName.Compare(sortKey.byName) != 0 {
 			c.deleteSortKey(oldSortKey)
 		}
 	}
-	c.resources[key] = resource
+	if c.resources[key] == nil {
+		c.resources[key] = newResourceOrCollection()
+	}
+	c.resources[key].add(resource)
 	c.nameTree.ReplaceOrInsert(&item{Key: sortKey.byName, Value: key})
 	c.typeTree.ReplaceOrInsert(&item{Key: sortKey.byType, Value: key})
 }
 
 func putResources[T resource](cache *UnifiedResourceCache, resources []T) {
 	for _, resource := range resources {
-		// generate the unique resource key and add the resource to the resources map
-		key := resourceKey(resource)
-		cache.resources[key] = resource
-
-		sortKey := makeResourceSortKey(resource)
-		cache.nameTree.ReplaceOrInsert(&item{Key: sortKey.byName, Value: key})
-		cache.typeTree.ReplaceOrInsert(&item{Key: sortKey.byType, Value: key})
+		cache.putLocked(resource)
 	}
 }
 
@@ -173,9 +170,12 @@ func (c *UnifiedResourceCache) deleteLocked(res types.Resource) error {
 		return trace.NotFound("cannot delete resource: key %s not found in unified resource cache", key)
 	}
 
-	sortKey := makeResourceSortKey(resource)
-	c.deleteSortKey(sortKey)
-	delete(c.resources, key)
+	resource.remove(res)
+	if resource.isEmpty() {
+		sortKey := makeResourceSortKey(resource.get())
+		c.deleteSortKey(sortKey)
+		delete(c.resources, key)
+	}
 	return nil
 }
 
@@ -249,8 +249,8 @@ func (c *UnifiedResourceCache) iterateItems(ctx context.Context, start string, s
 						return true
 					}
 
-					if len(kinds) == 0 || c.itemKindMatches(r, kindsMap) {
-						items = append(items, iteratedItem{key: item.Key, resource: r})
+					if len(kinds) == 0 || c.itemKindMatches(r.get(), kindsMap) {
+						items = append(items, iteratedItem{key: item.Key, resource: r.get()})
 					}
 
 					if len(items) >= defaultPageSize {
@@ -511,7 +511,7 @@ func (c *UnifiedResourceCache) GetUnifiedResourcesByIDs(ctx context.Context, ids
 			if !found || res == nil {
 				continue
 			}
-			resource := cache.resources[res.Value]
+			resource := cache.resources[res.Value].get()
 			match, err := matchFn(resource)
 			if err != nil {
 				return trace.Wrap(err)
@@ -872,7 +872,7 @@ func (c *UnifiedResourceCache) read(ctx context.Context, fn func(cache *UnifiedR
 			typeTree: btree.NewG(c.cfg.BTreeDegree, func(a, b *item) bool {
 				return a.Less(b)
 			}),
-			resources:       make(map[string]resource),
+			resources:       make(map[string]*resourceOrCollection),
 			ResourceGetter:  c.ResourceGetter,
 			initializationC: make(chan struct{}),
 		}
@@ -996,6 +996,70 @@ func (i *item) Less(iother btree.Item) bool {
 type resource interface {
 	types.ResourceWithLabels
 	CloneResource() types.ResourceWithLabels
+}
+
+type resourceWithHostIDAndHealth interface {
+	GetHostID() string
+	GetTargetHealth() types.TargetHealth
+	SetTargetHealth(types.TargetHealth)
+}
+
+type resourceOrCollection struct {
+	combined  resource
+	resources map[string]resource
+}
+
+func newResourceOrCollection() *resourceOrCollection {
+	return &resourceOrCollection{
+		resources: make(map[string]resource),
+	}
+}
+func (c *resourceOrCollection) get() resource {
+	return c.combined
+}
+func (c *resourceOrCollection) add(r resource) {
+	c.combined = r
+	c.resources[c.getID(r)] = r
+	c.calculateHealth()
+}
+
+func (c *resourceOrCollection) remove(r types.Resource) {
+	delete(c.resources, c.getID(r))
+	c.calculateHealth()
+}
+func (c *resourceOrCollection) isEmpty() bool {
+	return len(c.resources) == 0
+}
+func (c *resourceOrCollection) getID(r types.Resource) string {
+	if hasHostID, ok := r.(resourceWithHostIDAndHealth); ok {
+		return hasHostID.GetHostID()
+	}
+	return r.GetName()
+}
+func (c *resourceOrCollection) calculateHealth() {
+	combinedResource, ok := c.combined.(resourceWithHostIDAndHealth)
+	if !ok {
+		return
+	}
+	// TODO(greedy52) combine these a little better.
+	// Right now it's just picking one by priority Unhealthy > Unknown > Healthy
+	combinedHealth := combinedResource.GetTargetHealth()
+	for _, resource := range c.resources {
+		hasHealth, ok := resource.(resourceWithHostIDAndHealth)
+		if !ok {
+			continue
+		}
+		health := hasHealth.GetTargetHealth()
+		if health.Status == string(types.TargetHealthStatusUnhealthy) {
+			combinedHealth = health
+			return
+		}
+		if health.Status == string(types.TargetHealthStatusUnknown) &&
+			combinedHealth.Status == string(types.TargetHealthStatusHealthy) {
+			combinedHealth = health
+		}
+	}
+	combinedResource.SetTargetHealth(combinedHealth)
 }
 
 type item struct {

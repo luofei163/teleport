@@ -30,6 +30,7 @@ import (
 	"github.com/gravitational/teleport/api/client/proto"
 	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/lib/fixtures"
+	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/tlsca"
 )
 
@@ -84,7 +85,7 @@ func (m *mockAuthClient) GetCertAuthority(ctx context.Context, id types.CertAuth
 	return nil, trace.NotImplemented("GetCertAuthority")
 }
 
-func (m *mockAuthClient) GetClusterName(ctx context.Context) (types.ClusterName, error) {
+func (m *mockAuthClient) GetClusterName(opts ...services.MarshalOption) (types.ClusterName, error) {
 	return nil, trace.NotImplemented("GetClusterName")
 }
 

@@ -5625,6 +5625,7 @@ func NewGRPCServer(cfg GRPCServerConfig) (*GRPCServer, error) {
 		Backend:    cfg.AuthServer.Services,
 		Authorizer: cfg.Authorizer,
 		Emitter:    cfg.Emitter,
+		Uploader:   cfg.AuditLog,
 	})
 	recordingencryptionv1pb.RegisterRecordingEncryptionServiceServer(server, recordingEncryptionService)
 

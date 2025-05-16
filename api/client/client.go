@@ -92,6 +92,7 @@ import (
 	pluginspb "github.com/gravitational/teleport/api/gen/proto/go/teleport/plugins/v1"
 	presencepb "github.com/gravitational/teleport/api/gen/proto/go/teleport/presence/v1"
 	provisioningv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/provisioning/v1"
+	recordingencryptionv1pb "github.com/gravitational/teleport/api/gen/proto/go/teleport/recordingencryption/v1"
 	resourceusagepb "github.com/gravitational/teleport/api/gen/proto/go/teleport/resourceusage/v1"
 	samlidppb "github.com/gravitational/teleport/api/gen/proto/go/teleport/samlidp/v1"
 	secreportsv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/secreports/v1"
@@ -129,6 +130,7 @@ type AuthServiceClient struct {
 	auditlogpb.AuditLogServiceClient
 	userpreferencespb.UserPreferencesServiceClient
 	notificationsv1pb.NotificationServiceClient
+	recordingencryptionv1pb.RecordingEncryptionServiceClient
 }
 
 // Client is a gRPC Client that connects to a Teleport Auth server either
@@ -2578,6 +2580,44 @@ func (c *Client) StreamSessionEvents(ctx context.Context, sessionID string, star
 	}()
 
 	return ch, e
+}
+
+// StreamSessionEvents streams audit events from a given session recording.
+func (c *Client) UploadEncryptedRecording(ctx context.Context) (chan *recordingencryptionv1pb.UploadEncryptedRecordingRequest, chan error) {
+	pipe := make(chan *recordingencryptionv1pb.UploadEncryptedRecordingRequest)
+	errCh := make(chan error)
+
+	go func() (err error) {
+		defer func() {
+			errCh <- err
+		}()
+
+		stream, err := c.grpc.UploadEncryptedRecording(ctx)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+
+		var req *recordingencryptionv1pb.UploadEncryptedRecordingRequest
+		moreParts := true
+		for moreParts {
+			select {
+			case req, moreParts = <-pipe:
+				if !moreParts {
+					break
+				}
+
+				if err := stream.Send(req); err != nil {
+					return trace.Wrap(err)
+				}
+			case <-ctx.Done():
+				return trace.Wrap(ctx.Err())
+			}
+		}
+
+		return nil
+	}()
+
+	return pipe, errCh
 }
 
 // SearchEvents allows searching for events with a full pagination support.

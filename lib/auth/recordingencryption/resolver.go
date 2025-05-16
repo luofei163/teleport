@@ -1,6 +1,7 @@
 package recordingencryption
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -14,7 +15,9 @@ import (
 	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/cryptosuites"
+	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/services"
+	"github.com/gravitational/teleport/lib/session"
 )
 
 // EncryptionKeyStore provides methods for interacting with encryption keys.
@@ -51,6 +54,7 @@ type ResolverBackend struct {
 
 	logger   *slog.Logger
 	keyStore EncryptionKeyStore
+	uploader events.MultipartUploader
 }
 
 // ResolveRecordingEncryption examines the current state of the RescordingEncryption resource and advances it to the
@@ -234,6 +238,59 @@ func (r *ResolverBackend) GetDecryptionKey(ctx context.Context, publicKeys [][]b
 	}
 
 	return nil, trace.NotFound("no accessible decryption key found")
+}
+
+func (r *ResolverBackend) UploadEncryptedRecording(ctx context.Context) (chan *recordingencryptionv1.UploadEncryptedRecordingRequest, chan error) {
+	inputCh := make(chan *recordingencryptionv1.UploadEncryptedRecordingRequest)
+	errCh := make(chan error)
+
+	go func() (err error) {
+		defer func() {
+			errCh <- err
+		}()
+
+		var upload *events.StreamUpload
+		var parts []events.StreamPart
+		var req *recordingencryptionv1.UploadEncryptedRecordingRequest
+		moreParts := true
+		for moreParts {
+			if err := r.uploader.ReserveUploadPart(ctx, *upload, req.PartIndex+1); err != nil {
+				return trace.Wrap(err)
+			}
+
+			select {
+			case req, moreParts = <-inputCh:
+				if !moreParts {
+					break
+				}
+
+				if upload == nil {
+					sessID, err := session.ParseID(req.SessionId)
+					if err != nil {
+						return trace.Wrap(err)
+					}
+
+					upload, err = r.uploader.CreateUpload(ctx, *sessID)
+					if err != nil {
+						return trace.Wrap(err)
+					}
+					continue
+				}
+
+				part, err := r.uploader.UploadPart(ctx, *upload, req.PartIndex, bytes.NewReader(req.Part))
+				if err != nil {
+					return trace.Wrap(err)
+				}
+				parts = append(parts, *part)
+
+			case <-ctx.Done():
+				return trace.Wrap(ctx.Err())
+			}
+		}
+		return trace.Wrap(r.uploader.CompleteUpload(ctx, *upload, parts))
+	}()
+
+	return inputCh, errCh
 }
 
 // GetAgeEncryptionKeys returns an iterator of AgeEncryptionKeys from a list of WrappedKeys. This is for use in

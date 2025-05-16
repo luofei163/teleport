@@ -68,6 +68,8 @@ const (
 
 	// ProtoStreamV1 is a version of the binary protocol
 	ProtoStreamV1 = 1
+	// ProtoStreamV2 is a version of the binary protocol
+	ProtoStreamV2 = 2
 
 	// ProtoStreamV2 is a version of the binary protocol
 	ProtoStreamV2 = 2

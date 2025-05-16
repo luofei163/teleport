@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"io"
 	"log/slog"
 
 	"github.com/gravitational/trace"
@@ -12,9 +13,10 @@ import (
 	"github.com/gravitational/teleport"
 
 	"github.com/gravitational/teleport/api/types"
-	"github.com/gravitational/teleport/api/types/events"
+	apievents "github.com/gravitational/teleport/api/types/events"
 	"github.com/gravitational/teleport/lib/authz"
 	"github.com/gravitational/teleport/lib/cryptosuites"
+	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/services"
 
 	recordingencryptionv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/recordingencryption/v1"
@@ -38,7 +40,8 @@ type ServiceConfig struct {
 	Cache      Cache
 	Backend    services.RecordingEncryptionWithResolver
 	Authorizer authz.Authorizer
-	Emitter    events.Emitter
+	Emitter    apievents.Emitter
+	Uploader   events.EncryptedRecordingUploader
 }
 
 // NewService returns a new [Service] based on the given [ServiceConfig].
@@ -67,6 +70,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		backend:    cfg.Backend,
 		authorizer: cfg.Authorizer,
 		emitter:    cfg.Emitter,
+		uploader:   cfg.Uploader,
 	}, nil
 }
 
@@ -78,7 +82,8 @@ type Service struct {
 	cache      Cache
 	authorizer authz.Authorizer
 	backend    services.RecordingEncryptionWithResolver
-	emitter    events.Emitter
+	emitter    apievents.Emitter
+	uploader   events.EncryptedRecordingUploader
 }
 
 // RotateKeySet starts the process of rotating the active session recording encryption keypairs.
@@ -102,5 +107,29 @@ func (s *Service) CompleteRotation(ctx context.Context, req *recordingencryption
 // UploadEncryptedRecording responds to requests to upload recordings that have already been encrypted using the
 // async recording mode.
 func (s *Service) UploadEncryptedRecording(stream grpc.ClientStreamingServer[recordingencryptionv1.UploadEncryptedRecordingRequest, recordingencryptionv1.UploadEncryptedRecordingResponse]) error {
-	return errors.New("unimplemented")
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+
+	pipe, errCh := s.uploader.UploadEncryptedRecording(ctx)
+	defer close(pipe)
+	for {
+		req, err := stream.Recv()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			cancel()
+			return trace.Wrap(err)
+		}
+
+		pipe <- req
+	}
+
+	err, hasErr := <-errCh
+	if hasErr {
+		s.logger.ErrorContext(ctx, "failed to upload encrypted recording", "error", err)
+		return trace.Wrap(err)
+	}
+
+	return nil
 }

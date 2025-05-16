@@ -8,31 +8,38 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/lib/events"
-	"github.com/gravitational/teleport/lib/services"
 )
 
+type SessionRecordingConfigGetter interface {
+	GetSessionRecordingConfig(ctx context.Context) (types.SessionRecordingConfig, error)
+}
+
+type DecryptionKeyGetter interface {
+	GetDecryptionKey(ctx context.Context, publicKeys [][]byte) (*types.EncryptionKeyPair, error)
+}
 type EncryptedIO struct {
-	clusterConfig       services.ClusterConfiguration
-	recordingEncryption services.RecordingEncryptionResolver
+	srcGetter           SessionRecordingConfigGetter
+	decryptionKeyGetter DecryptionKeyGetter
 }
 
 var _ events.EncryptedIO = (*EncryptedIO)(nil)
 
-func NewEncryptedIO(clusterConfig services.ClusterConfiguration, recordingEncryption services.RecordingEncryptionResolver) *EncryptedIO {
+func NewEncryptedIO(srcgetter SessionRecordingConfigGetter, decryptionKeyGetter DecryptionKeyGetter) *EncryptedIO {
 	return &EncryptedIO{
-		clusterConfig:       clusterConfig,
-		recordingEncryption: recordingEncryption,
+		srcGetter:           srcgetter,
+		decryptionKeyGetter: decryptionKeyGetter,
 	}
 }
 
 func (e *EncryptedIO) WithEncryption(writer io.WriteCloser) (io.WriteCloser, error) {
-	if e.clusterConfig == nil {
+	if e.srcGetter == nil {
 		return writer, nil
 	}
 
 	ctx := context.TODO()
-	src, err := e.clusterConfig.GetSessionRecordingConfig(ctx)
+	src, err := e.srcGetter.GetSessionRecordingConfig(ctx)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -56,11 +63,11 @@ func (e *EncryptedIO) WithEncryption(writer io.WriteCloser) (io.WriteCloser, err
 }
 
 func (e *EncryptedIO) WithDecryption(reader io.Reader) (io.Reader, error) {
-	if e.recordingEncryption == nil {
+	if e.decryptionKeyGetter == nil {
 		return reader, nil
 	}
 	ctx := context.TODO()
-	pair, err := e.recordingEncryption.GetDecryptionKey(ctx, nil)
+	pair, err := e.decryptionKeyGetter.GetDecryptionKey(ctx, nil)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}

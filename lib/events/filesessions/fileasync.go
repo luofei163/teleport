@@ -34,10 +34,12 @@ import (
 
 	"github.com/gravitational/teleport"
 	apidefaults "github.com/gravitational/teleport/api/defaults"
+	recordingencryptionv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/recordingencryption/v1"
 	apievents "github.com/gravitational/teleport/api/types/events"
 	"github.com/gravitational/teleport/api/utils/retryutils"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/events"
+	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/utils"
 )
@@ -63,6 +65,8 @@ type UploaderConfig struct {
 	EventsC chan events.UploadEvent
 	// Component is used for logging purposes
 	Component string
+	// EncryptedRecordingUploader
+	EncryptedRecordingUploader services.EncryptedRecordingUploader
 }
 
 // CheckAndSetDefaults checks and sets default values of UploaderConfig
@@ -437,6 +441,44 @@ func (u *Uploader) startUpload(ctx context.Context, fileName string) (err error)
 			log.WarnContext(ctx, "Failed to close", "error", err, "upload", fileName)
 		}
 		return trace.Wrap(err, "uploader could not acquire file lock for %q", sessionFilePath)
+	}
+
+	if u.cfg.EncryptedRecordingUploader != nil {
+		ctx, cancel := context.WithCancel(ctx)
+
+		pipe, errCh := u.cfg.EncryptedRecordingUploader.UploadEncryptedRecording(ctx)
+		u.wg.Add(1)
+		go func() {
+			defer u.wg.Done()
+			reader := io.LimitReader(sessionFile, events.MinUploadPartSizeBytes)
+
+			buf := make([]byte, events.MinUploadPartSizeBytes)
+			for i := 0; ; i++ {
+				read, err := reader.Read(buf)
+				if err != nil {
+					if err != io.EOF {
+						log.ErrorContext(ctx, "could not read session file", "error", err)
+						cancel()
+						break
+					}
+					close(pipe)
+					return
+				}
+
+				pipe <- &recordingencryptionv1.UploadEncryptedRecordingRequest{
+					Part:      buf[:read],
+					PartIndex: int64(i),
+					SessionId: sessionID.String(),
+				}
+			}
+
+			err := <-errCh
+			if err != nil {
+				log.ErrorContext(ctx, "upload failed", "error", err)
+			}
+		}()
+
+		return trace.ConvertSystemError(os.Remove(sessionFile.Name()))
 	}
 
 	protoReader, err := events.NewProtoReader(sessionFile, nil)

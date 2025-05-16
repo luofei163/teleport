@@ -19,59 +19,86 @@
 package services
 
 import (
+	"cmp"
 	"context"
+	"fmt"
 	"iter"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/google/btree"
 	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
 
 	"github.com/gravitational/teleport"
-	"github.com/gravitational/teleport/api/client/proto"
+	clientproto "github.com/gravitational/teleport/api/client/proto"
 	apidefaults "github.com/gravitational/teleport/api/defaults"
 	identitycenterv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/identitycenter/v1"
 	"github.com/gravitational/teleport/api/types"
-	apiutils "github.com/gravitational/teleport/api/utils"
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/utils"
 	logutils "github.com/gravitational/teleport/lib/utils/log"
 	"github.com/gravitational/teleport/lib/utils/pagination"
+	"github.com/gravitational/teleport/lib/utils/sortcache"
 )
 
 // UnifiedResourceCacheConfig is used to configure a UnifiedResourceCache
 type UnifiedResourceCacheConfig struct {
-	// BTreeDegree is a degree of B-Tree, 2 for example, will create a
-	// 2-3-4 tree (each node contains 1-3 items and 2-4 children).
-	BTreeDegree int
 	// Clock is a clock for time-related operations
 	Clock clockwork.Clock
-	// Component is a logging component
-	Component string
 	ResourceWatcherConfig
 	ResourceGetter
 }
 
 // UnifiedResourceCache contains a representation of all resources that are displayable in the UI
 type UnifiedResourceCache struct {
-	rw     sync.RWMutex
-	logger *slog.Logger
-	cfg    UnifiedResourceCacheConfig
-	// nameTree is a BTree with items sorted by (hostname)/name/type
-	nameTree *btree.BTreeG[*item]
-	// typeTree is a BTree with items sorted by type/(hostname)/name
-	typeTree *btree.BTreeG[*item]
-	// resources is a map of all resources currently tracked in the tree
-	// the key is always name/type
-	resources       map[string]resource
+	rw              sync.RWMutex
+	logger          *slog.Logger
+	cfg             UnifiedResourceCacheConfig
+	itemCache       *sortcache.SortCache[types.ResourceWithLabels, string]
 	initializationC chan struct{}
 	stale           bool
 	once            sync.Once
 	cache           *utils.FnCache
-	ResourceGetter
+	resourceGetter  ResourceGetter
+}
+
+// unifiedResourceName will generate the unique resource name
+func unifiedResourceName(res types.Resource) string {
+	var name string
+	switch r := res.(type) {
+	case types.Server:
+		switch r.GetKind() {
+		case types.KindNode, types.KindGitServer:
+			name = r.GetHostname() + "/" + r.GetName()
+		}
+	case types.Application:
+		friendlyName := types.FriendlyName(r)
+		if friendlyName != "" {
+			sanitizedFriendlyName := strings.ReplaceAll(types.FriendlyName(r), "/", "-")
+			// FriendlyName is not unique, and multiple apps may have the same friendly name.
+			// To prevent collisions in the resource cache, we append the app name to the
+			// friendly name, ensuring uniqueness.
+			name = sanitizedFriendlyName + "/" + r.GetName()
+		} else {
+			name = r.GetName()
+		}
+	case types.AppServer:
+		name = r.GetHostID()
+	case types.KubeServer:
+		name = r.GetHostID()
+	case types.DatabaseServer:
+		name = r.GetHostID()
+	case types.Resource153UnwrapperT[*identitycenterv1.Account]:
+		name = r.UnwrapT().GetMetadata().GetName()
+	default:
+		name = r.GetName()
+	}
+
+	// names should be stored as lowercase to keep items sorted as
+	// expected, regardless of case
+	return strings.ToLower(name)
 }
 
 // NewUnifiedResourceCache creates a new memory cache that holds the unified resources
@@ -92,15 +119,41 @@ func NewUnifiedResourceCache(ctx context.Context, cfg UnifiedResourceCacheConfig
 	m := &UnifiedResourceCache{
 		logger: slog.With(teleport.ComponentKey, cfg.Component),
 		cfg:    cfg,
-		nameTree: btree.NewG(cfg.BTreeDegree, func(a, b *item) bool {
-			return a.Less(b)
+		itemCache: sortcache.New(sortcache.Config[types.ResourceWithLabels, string]{
+			Indexes: map[string]func(types.ResourceWithLabels) string{
+				"name": func(r types.ResourceWithLabels) string {
+					return unifiedResourceName(r)
+				},
+				"kind": func(r types.ResourceWithLabels) string {
+					return r.GetKind() + "/" + unifiedResourceName(r)
+				},
+				"identifier": func(r types.ResourceWithLabels) string {
+					if h, ok := r.(interface{ GetHostID() string }); ok {
+						return r.GetKind() + "/" + h.GetHostID()
+					}
+
+					return r.GetKind() + "/" + r.GetName()
+				},
+				"health_name": func(r types.ResourceWithLabels) string {
+					var health string
+					if rh, ok := r.(resourceWithHealth); ok {
+						health = rh.GetTargetHealth().Status
+					}
+
+					return health + "/" + unifiedResourceName(r)
+				},
+				"health_kind": func(r types.ResourceWithLabels) string {
+					var health string
+					if rh, ok := r.(resourceWithHealth); ok {
+						health = rh.GetTargetHealth().Status
+					}
+
+					return health + "/" + r.GetKind() + "/" + unifiedResourceName(r)
+				},
+			},
 		}),
-		typeTree: btree.NewG(cfg.BTreeDegree, func(a, b *item) bool {
-			return a.Less(b)
-		}),
-		resources:       make(map[string]resource),
 		initializationC: make(chan struct{}),
-		ResourceGetter:  cfg.ResourceGetter,
+		resourceGetter:  cfg.ResourceGetter,
 		cache:           lazyCache,
 		stale:           true,
 	}
@@ -113,9 +166,6 @@ func NewUnifiedResourceCache(ctx context.Context, cfg UnifiedResourceCacheConfig
 
 // CheckAndSetDefaults checks and sets default values
 func (cfg *UnifiedResourceCacheConfig) CheckAndSetDefaults() error {
-	if cfg.BTreeDegree <= 0 {
-		cfg.BTreeDegree = 8
-	}
 	if cfg.Clock == nil {
 		cfg.Clock = clockwork.NewRealClock()
 	}
@@ -125,74 +175,9 @@ func (cfg *UnifiedResourceCacheConfig) CheckAndSetDefaults() error {
 	return nil
 }
 
-func (c *UnifiedResourceCache) putLocked(resource resource) {
-	key := resourceKey(resource)
-	sortKey := makeResourceSortKey(resource)
-	oldResource, exists := c.resources[key]
-	if exists {
-		// If the resource has changed in such a way that the sort keys
-		// for the nameTree or typeTree change, remove the old entries
-		// from those trees before adding a new one. This can happen
-		// when a node's hostname changes
-		oldSortKey := makeResourceSortKey(oldResource)
-		if oldSortKey.byName.Compare(sortKey.byName) != 0 {
-			c.deleteSortKey(oldSortKey)
-		}
-	}
-	c.resources[key] = resource
-	c.nameTree.ReplaceOrInsert(&item{Key: sortKey.byName, Value: key})
-	c.typeTree.ReplaceOrInsert(&item{Key: sortKey.byType, Value: key})
-}
-
-func putResources[T resource](cache *UnifiedResourceCache, resources []T) {
-	for _, resource := range resources {
-		// generate the unique resource key and add the resource to the resources map
-		key := resourceKey(resource)
-		cache.resources[key] = resource
-
-		sortKey := makeResourceSortKey(resource)
-		cache.nameTree.ReplaceOrInsert(&item{Key: sortKey.byName, Value: key})
-		cache.typeTree.ReplaceOrInsert(&item{Key: sortKey.byType, Value: key})
-	}
-}
-
-func (c *UnifiedResourceCache) deleteSortKey(sortKey resourceSortKey) error {
-	if _, ok := c.nameTree.Delete(&item{Key: sortKey.byName}); !ok {
-		return trace.NotFound("key %q is not found in unified cache name sort tree", sortKey.byName.String())
-	}
-	if _, ok := c.typeTree.Delete(&item{Key: sortKey.byType}); !ok {
-		return trace.NotFound("key %q is not found in unified cache type sort tree", sortKey.byType.String())
-	}
-	return nil
-}
-
-func (c *UnifiedResourceCache) deleteLocked(res types.Resource) error {
-	key := resourceKey(res)
-	resource, exists := c.resources[key]
-	if !exists {
-		return trace.NotFound("cannot delete resource: key %s not found in unified resource cache", key)
-	}
-
-	sortKey := makeResourceSortKey(resource)
-	c.deleteSortKey(sortKey)
-	delete(c.resources, key)
-	return nil
-}
-
-func (c *UnifiedResourceCache) getSortTree(sortField string) (*btree.BTreeG[*item], error) {
-	switch sortField {
-	case "", sortByName:
-		return c.nameTree, nil
-	case sortByKind:
-		return c.typeTree, nil
-	default:
-		return nil, trace.NotImplemented("sorting by %v is not supported in unified resources", sortField)
-	}
-}
-
 type iteratedItem struct {
-	resource resource
-	key      backend.Key
+	resource types.ResourceWithLabels
+	key      string
 }
 
 // iterateItems is a helper for iterating the correct cache, in the correct order
@@ -205,62 +190,37 @@ func (c *UnifiedResourceCache) iterateItems(ctx context.Context, start string, s
 			kindsMap[k] = struct{}{}
 		}
 
-		var startKey backend.Key
-		if start != "" {
-			startKey = backend.KeyFromString(start)
-		}
-
-		itemIter := (*btree.BTreeG[*item]).AscendGreaterOrEqual
+		resources := (*sortcache.SortCache[types.ResourceWithLabels, string]).Ascend
 		if sortBy.IsDesc {
-			itemIter = (*btree.BTreeG[*item]).DescendLessOrEqual
+			resources = (*sortcache.SortCache[types.ResourceWithLabels, string]).Descend
 		}
 
 		var excludedStart bool
-		const defaultPageSize = 100
+		const defaultPageSize = 2
 		items := make([]iteratedItem, 0, defaultPageSize)
 		for {
 			items = items[:0]
 
 			err := c.read(ctx, func(cache *UnifiedResourceCache) error {
-				tree, err := cache.getSortTree(sortBy.Field)
-				if err != nil {
-					return trace.Wrap(err, "getting sort tree")
-				}
-
-				if startKey.IsZero() {
-					max, ok := tree.Max()
-					if sortBy.IsDesc && ok {
-						startKey = max.Key
-					} else {
-						startKey = backend.NewKey("")
-					}
-				}
-
-				itemIter(tree, &item{Key: startKey}, func(item *item) bool {
+				for r := range resources(cache.itemCache, cmp.Or(sortBy.Field, "name"), start, "") {
+					name := unifiedResourceName(r)
 					if excludedStart {
 						excludedStart = false
-						if item.Key.Compare(startKey) <= 0 {
-							return true
+						if strings.Compare(name, start) <= 0 {
+							continue
 						}
 					}
 
-					r, ok := cache.resources[item.Value]
-					if !ok {
-						return true
-					}
-
 					if len(kinds) == 0 || c.itemKindMatches(r, kindsMap) {
-						items = append(items, iteratedItem{key: item.Key, resource: r})
+						items = append(items, iteratedItem{key: name, resource: r})
 					}
 
 					if len(items) >= defaultPageSize {
-						startKey = item.Key
+						start = name
 						excludedStart = true
-						return false
+						return nil
 					}
-
-					return true
-				})
+				}
 
 				return nil
 			})
@@ -294,10 +254,35 @@ func (c *UnifiedResourceCache) Resources(ctx context.Context, start string, sort
 				return
 			}
 
-			if !yield(item.resource.CloneResource(), nil) {
+			if !yield(c.cloneResource(item.resource), nil) {
 				return
 			}
 		}
+	}
+}
+
+func (c *UnifiedResourceCache) cloneResource(res types.Resource) types.ResourceWithLabels {
+	switch r := res.(type) {
+	case types.Server:
+		return r.DeepCopy()
+	case types.Application:
+		return r.Copy()
+	case types.AppServer:
+		return r.Copy()
+	case types.KubeCluster:
+		return r.Copy()
+	case types.KubeServer:
+		return r.Copy()
+	case types.Database:
+		return r.Copy()
+	case types.DatabaseServer:
+		return r.Copy()
+	case types.WindowsDesktop:
+		return r.Copy()
+	case types.SAMLIdPServiceProvider:
+		return r.Copy()
+	default:
+		panic(fmt.Sprintf("unknown resource! %T", r))
 	}
 }
 
@@ -310,82 +295,40 @@ type UnifiedResourcesIterateParams struct {
 
 // Nodes iterates over all cached nodes starting from the provided key.
 func (c *UnifiedResourceCache) Nodes(ctx context.Context, params UnifiedResourcesIterateParams) iter.Seq2[types.Server, error] {
-	return iterateUnifiedResourceCache(ctx, c, params, types.KindNode, types.Server.DeepCopy)
+	return iterateUnifiedResourceCache[types.Server](ctx, c, params, types.KindNode)
 }
 
 // AppServers iterates over all cached app servers starting from the provided key.
 func (c *UnifiedResourceCache) AppServers(ctx context.Context, params UnifiedResourcesIterateParams) iter.Seq2[types.AppServer, error] {
-	return iterateUnifiedResourceCache(ctx, c, params, types.KindAppServer, types.AppServer.Copy)
+	return iterateUnifiedResourceCache[types.AppServer](ctx, c, params, types.KindAppServer)
 }
 
 // DatabaseServers iterates over all cached database servers starting from the provided key.
 func (c *UnifiedResourceCache) DatabaseServers(ctx context.Context, params UnifiedResourcesIterateParams) iter.Seq2[types.DatabaseServer, error] {
-	return iterateUnifiedResourceCache(ctx, c, params, types.KindDatabaseServer, types.DatabaseServer.Copy)
+	return iterateUnifiedResourceCache[types.DatabaseServer](ctx, c, params, types.KindDatabaseServer)
 }
 
 // KubernetesServers iterates over all cached Kubernetes servers starting from the provided key.
 func (c *UnifiedResourceCache) KubernetesServers(ctx context.Context, params UnifiedResourcesIterateParams) iter.Seq2[types.KubeServer, error] {
-	return iterateUnifiedResourceCache(ctx, c, params, types.KindKubeServer, types.KubeServer.Copy)
+	return iterateUnifiedResourceCache[types.KubeServer](ctx, c, params, types.KindKubeServer)
 }
 
 // WindowsDesktops iterates over all cached windows desktops starting from the provided key.
 func (c *UnifiedResourceCache) WindowsDesktops(ctx context.Context, params UnifiedResourcesIterateParams) iter.Seq2[types.WindowsDesktop, error] {
-	return iterateUnifiedResourceCache(ctx, c, params, types.KindWindowsDesktop, func(desktop types.WindowsDesktop) types.WindowsDesktop { return desktop.Copy() })
+	return iterateUnifiedResourceCache[types.WindowsDesktop](ctx, c, params, types.KindWindowsDesktop)
 }
 
 // GitServers iterates over all cached git servers starting from the provided key.
 func (c *UnifiedResourceCache) GitServers(ctx context.Context, params UnifiedResourcesIterateParams) iter.Seq2[types.Server, error] {
-	return iterateUnifiedResourceCache(ctx, c, params, types.KindGitServer, types.Server.DeepCopy)
+	return iterateUnifiedResourceCache[types.Server](ctx, c, params, types.KindGitServer)
 }
 
 // SAMLIdPServiceProviders iterates over all cached sAML IdP service providers starting from the provided key.
 func (c *UnifiedResourceCache) SAMLIdPServiceProviders(ctx context.Context, params UnifiedResourcesIterateParams) iter.Seq2[types.SAMLIdPServiceProvider, error] {
-	return iterateUnifiedResourceCache(ctx, c, params, types.KindSAMLIdPServiceProvider, types.SAMLIdPServiceProvider.Copy)
+	return iterateUnifiedResourceCache[types.SAMLIdPServiceProvider](ctx, c, params, types.KindSAMLIdPServiceProvider)
 }
 
-// IdentityCenterAccounts iterates over all cached identity center accounts starting from the provided key.
-func (c *UnifiedResourceCache) IdentityCenterAccounts(ctx context.Context, params UnifiedResourcesIterateParams) iter.Seq2[*identitycenterv1.Account, error] {
-	// cloning is performed on the concrete resource below instead of
-	// on the wrapper type.
-	cloneFn := func(account types.Resource153UnwrapperT[IdentityCenterAccount]) types.Resource153UnwrapperT[IdentityCenterAccount] {
-		return account
-	}
-	return func(yield func(*identitycenterv1.Account, error) bool) {
-		for account, err := range iterateUnifiedResourceCache(ctx, c, params, types.KindIdentityCenterAccount, cloneFn) {
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-
-			if !yield(apiutils.CloneProtoMsg(account.UnwrapT().Account), nil) {
-				return
-			}
-		}
-	}
-}
-
-// IdentityCenterAccountAssignments iterates over all cached identity center account assignments starting from the provided key.
-func (c *UnifiedResourceCache) IdentityCenterAccountAssignments(ctx context.Context, params UnifiedResourcesIterateParams) iter.Seq2[*identitycenterv1.AccountAssignment, error] {
-	// cloning is performed on the concrete resource below instead of
-	// on the wrapper type.
-	cloneFn := func(account types.Resource153UnwrapperT[IdentityCenterAccountAssignment]) types.Resource153UnwrapperT[IdentityCenterAccountAssignment] {
-		return account
-	}
-	return func(yield func(*identitycenterv1.AccountAssignment, error) bool) {
-		for assignment, err := range iterateUnifiedResourceCache(ctx, c, params, types.KindIdentityCenterAccountAssignment, cloneFn) {
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-
-			if !yield(apiutils.CloneProtoMsg(assignment.UnwrapT().AccountAssignment), nil) {
-				return
-			}
-		}
-	}
-}
-
-func iterateUnifiedResourceCache[T any](ctx context.Context, c *UnifiedResourceCache, params UnifiedResourcesIterateParams, kind string, cloneFn func(T) T) iter.Seq2[T, error] {
+func iterateUnifiedResourceCache[T any](ctx context.Context, c *UnifiedResourceCache, params UnifiedResourcesIterateParams, kind string) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {
 		sortBy := types.SortBy{IsDesc: params.Descending, Field: SortByName}
 		for i, err := range c.iterateItems(ctx, params.Start, sortBy, kind) {
@@ -395,7 +338,7 @@ func iterateUnifiedResourceCache[T any](ctx context.Context, c *UnifiedResourceC
 				return
 			}
 
-			if !yield(cloneFn(i.resource.(T)), nil) {
+			if !yield(c.cloneResource(i.resource.(types.ResourceWithLabels)).(T), nil) {
 				return
 			}
 		}
@@ -405,7 +348,7 @@ func iterateUnifiedResourceCache[T any](ctx context.Context, c *UnifiedResourceC
 // IterateUnifiedResources allows building a custom page of resources. All items within the
 // range and limit of the request are passed to the matchFn. Only those resource which
 // have a true value returned from the matchFn are included in the returned page.
-func (c *UnifiedResourceCache) IterateUnifiedResources(ctx context.Context, matchFn func(types.ResourceWithLabels) (bool, error), req *proto.ListUnifiedResourcesRequest) ([]types.ResourceWithLabels, string, error) {
+func (c *UnifiedResourceCache) IterateUnifiedResources(ctx context.Context, matchFn func(types.ResourceWithLabels) (bool, error), req *clientproto.ListUnifiedResourcesRequest) ([]types.ResourceWithLabels, string, error) {
 	var resources []types.ResourceWithLabels
 	for item, err := range c.iterateItems(ctx, req.StartKey, req.SortBy, req.Kinds...) {
 		if err != nil {
@@ -419,21 +362,20 @@ func (c *UnifiedResourceCache) IterateUnifiedResources(ctx context.Context, matc
 
 		if match {
 			if req.Limit != backend.NoLimit && len(resources) == int(req.Limit) {
-				return resources, item.key.String(), nil
+				return resources, item.key, nil
 			}
 
-			resources = append(resources, item.resource.CloneResource())
+			resources = append(resources, c.cloneResource(item.resource))
 		}
 	}
 
 	return resources, "", nil
 }
 
-func (c *UnifiedResourceCache) itemKindMatches(r resource, kinds map[string]struct{}) bool {
+func (c *UnifiedResourceCache) itemKindMatches(r types.ResourceWithLabels, kinds map[string]struct{}) bool {
 	switch r.GetKind() {
 	case types.KindNode,
 		types.KindWindowsDesktop,
-		types.KindIdentityCenterAccountAssignment,
 		types.KindGitServer,
 		types.KindDatabase,
 		types.KindKubernetesCluster:
@@ -506,18 +448,16 @@ func (c *UnifiedResourceCache) GetUnifiedResourcesByIDs(ctx context.Context, ids
 
 	err := c.read(ctx, func(cache *UnifiedResourceCache) error {
 		for _, id := range ids {
-			key := backend.NewKey(prefix, id)
-			res, found := cache.nameTree.Get(&item{Key: key})
-			if !found || res == nil {
+			resource, found := c.itemCache.Get("name", id)
+			if !found || resource == nil {
 				continue
 			}
-			resource := cache.resources[res.Value]
 			match, err := matchFn(resource)
 			if err != nil {
 				return trace.Wrap(err)
 			}
 			if match {
-				resources = append(resources, resource.CloneResource())
+				resources = append(resources, c.cloneResource(resource))
 			}
 		}
 		return nil
@@ -539,7 +479,6 @@ type ResourceGetter interface {
 	KubernetesServerGetter
 	SAMLIdpServiceProviderGetter
 	IdentityCenterAccountGetter
-	IdentityCenterAccountAssignmentGetter
 	GitServerGetter
 }
 
@@ -553,71 +492,6 @@ func newWatcher(ctx context.Context, resourceCache *UnifiedResourceCache, cfg Re
 		return trace.Wrap(err, "creating a new unified resource watcher")
 	}
 	return nil
-}
-
-// resourceName is a unique name to be used as a key in the resources map
-func resourceKey(resource types.Resource) string {
-	return resource.GetName() + "/" + resource.GetKind()
-}
-
-type resourceSortKey struct {
-	byName backend.Key
-	byType backend.Key
-}
-
-// resourceSortKey will generate a key to be used in the sort trees
-func makeResourceSortKey(resource types.Resource) resourceSortKey {
-	var name, kind string
-	// set the kind to the appropriate "contained" type, rather than
-	// the container type.
-	switch r := resource.(type) {
-	case types.Server:
-		switch r.GetKind() {
-		case types.KindNode, types.KindGitServer:
-			name = r.GetHostname() + "/" + r.GetName()
-			kind = r.GetKind()
-		}
-	case types.AppServer:
-		app := r.GetApp()
-		if app != nil {
-			friendlyName := types.FriendlyName(app)
-			if friendlyName != "" {
-				sanitizedFriendlyName := strings.ReplaceAll(types.FriendlyName(app), "/", "-")
-				// FriendlyName is not unique, and multiple apps may have the same friendly name.
-				// To prevent collisions in the resource cache, we append the app name to the
-				// friendly name, ensuring uniqueness.
-				name = sanitizedFriendlyName + "/" + app.GetName()
-			} else {
-				name = app.GetName()
-			}
-			kind = types.KindApp
-		}
-	case types.SAMLIdPServiceProvider:
-		name = r.GetName()
-		kind = types.KindApp
-	case types.KubeServer:
-		cluster := r.GetCluster()
-		if cluster != nil {
-			name = r.GetCluster().GetName()
-			kind = types.KindKubernetesCluster
-		}
-	case types.DatabaseServer:
-		db := r.GetDatabase()
-		if db != nil {
-			name = db.GetName()
-			kind = types.KindDatabase
-		}
-	default:
-		name = resource.GetName()
-		kind = resource.GetKind()
-	}
-
-	return resourceSortKey{
-		// names should be stored as lowercase to keep items sorted as
-		// expected, regardless of case
-		byName: backend.NewKey(prefix, strings.ToLower(name), kind),
-		byType: backend.NewKey(prefix, kind, strings.ToLower(name)),
-	}
 }
 
 func (c *UnifiedResourceCache) getResourcesAndUpdateCurrent(ctx context.Context) error {
@@ -656,11 +530,6 @@ func (c *UnifiedResourceCache) getResourcesAndUpdateCurrent(ctx context.Context)
 		return trace.Wrap(err)
 	}
 
-	newICAccountAssignments, err := c.getIdentityCenterAccountAssignments(ctx)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-
 	newGitServers, err := c.getGitServers(ctx)
 	if err != nil {
 		return trace.Wrap(err)
@@ -668,30 +537,93 @@ func (c *UnifiedResourceCache) getResourcesAndUpdateCurrent(ctx context.Context)
 
 	c.rw.Lock()
 	defer c.rw.Unlock()
-	// empty the trees
-	c.nameTree.Clear(false)
-	c.typeTree.Clear(false)
-	// clear the resource map as well
-	// c.resources = make(map[string]resource)
-	clear(c.resources)
+	c.itemCache.Clear()
 
-	putResources[types.Server](c, newNodes)
-	putResources[types.DatabaseServer](c, newDbs)
-	putResources[types.AppServer](c, newApps)
-	putResources[types.KubeServer](c, newKubes)
-	putResources[types.SAMLIdPServiceProvider](c, newSAMLApps)
-	putResources[types.WindowsDesktop](c, newDesktops)
-	putResources[resource](c, newICAccounts)
-	putResources[resource](c, newICAccountAssignments)
-	putResources[types.Server](c, newGitServers)
+	for _, n := range newNodes {
+		c.itemCache.Put(n)
+	}
+
+	for _, d := range newDbs {
+		c.itemCache.Put(d)
+	}
+
+	for _, a := range newApps {
+		c.itemCache.Put(a)
+	}
+
+	for _, k := range newKubes {
+		c.itemCache.Put(k)
+	}
+
+	for _, sa := range newSAMLApps {
+		c.itemCache.Put(sa)
+	}
+
+	for _, d := range newDesktops {
+		c.itemCache.Put(d)
+	}
+
+	for _, ica := range newICAccounts {
+		c.itemCache.Put(IdentityCenterAccountToAppServer(ica))
+	}
+
+	for _, g := range newGitServers {
+		c.itemCache.Put(g)
+	}
+
 	c.stale = false
 	c.defineCollectorAsInitialized()
 	return nil
 }
 
+func IdentityCenterAccountToAppServer(acct *identitycenterv1.Account) *types.AppServerV3 {
+	srcPSs := acct.GetSpec().GetPermissionSetInfo()
+	pss := make([]*types.IdentityCenterPermissionSet, len(srcPSs))
+	for i, ps := range acct.GetSpec().GetPermissionSetInfo() {
+		pss[i] = &types.IdentityCenterPermissionSet{
+			ARN:          ps.Arn,
+			Name:         ps.Name,
+			AssignmentID: ps.AssignmentId,
+		}
+	}
+
+	expiry := acct.GetMetadata().GetExpires().AsTime()
+
+	return &types.AppServerV3{
+		Kind:    types.KindAppServer,
+		Version: types.V3,
+		Metadata: types.Metadata{
+			Name:        acct.GetMetadata().GetName(),
+			Description: acct.GetSpec().GetName(),
+			Labels:      acct.GetMetadata().GetLabels(),
+			Expires:     &expiry,
+		},
+		Spec: types.AppServerSpecV3{
+			HostID: acct.GetMetadata().GetName(),
+			App: &types.AppV3{
+				Kind:     types.KindApp,
+				SubKind:  types.KindIdentityCenterAccount,
+				Version:  types.V3,
+				Metadata: types.Metadata153ToLegacy(acct.Metadata),
+				Spec: types.AppSpecV3{
+					URI:        acct.Spec.StartUrl,
+					PublicAddr: acct.Spec.StartUrl,
+					AWS: &types.AppAWS{
+						ExternalID: acct.Spec.Id,
+					},
+					IdentityCenter: &types.AppIdentityCenter{
+						AccountID:      acct.Spec.Id,
+						PermissionSets: pss,
+					},
+				},
+			},
+		},
+	}
+}
+
 // getNodes will get all nodes
 func (c *UnifiedResourceCache) getNodes(ctx context.Context) ([]types.Server, error) {
-	newNodes, err := c.ResourceGetter.GetNodes(ctx, apidefaults.Namespace)
+	newNodes, err := c.resourceGetter.GetNodes(ctx, apidefaults.Namespace)
 	if err != nil {
 		return nil, trace.Wrap(err, "getting nodes for unified resource watcher")
 	}
@@ -701,69 +633,36 @@ func (c *UnifiedResourceCache) getNodes(ctx context.Context) ([]types.Server, er
 
 // getDatabaseServers will get all database servers
 func (c *UnifiedResourceCache) getDatabaseServers(ctx context.Context) ([]types.DatabaseServer, error) {
-	newDbs, err := c.GetDatabaseServers(ctx, apidefaults.Namespace)
+	newDbs, err := c.resourceGetter.GetDatabaseServers(ctx, apidefaults.Namespace)
 	if err != nil {
 		return nil, trace.Wrap(err, "getting database servers for unified resource watcher")
 	}
-	// because it's possible to have multiple replicas of a database server serving the same database
-	// we only want to store one based on its internal database resource
-	unique := map[string]struct{}{}
-	resources := make([]types.DatabaseServer, 0, len(newDbs))
-	for _, dbServer := range newDbs {
-		db := dbServer.GetDatabase()
-		if _, ok := unique[db.GetName()]; ok {
-			continue
-		}
-		unique[db.GetName()] = struct{}{}
-		resources = append(resources, dbServer)
-	}
 
-	return resources, nil
+	return newDbs, nil
 }
 
 // getKubeServers will get all kube servers
 func (c *UnifiedResourceCache) getKubeServers(ctx context.Context) ([]types.KubeServer, error) {
-	newKubes, err := c.GetKubernetesServers(ctx)
+	newKubes, err := c.resourceGetter.GetKubernetesServers(ctx)
 	if err != nil {
 		return nil, trace.Wrap(err, "getting kube servers for unified resource watcher")
 	}
-	unique := map[string]struct{}{}
-	resources := make([]types.KubeServer, 0, len(newKubes))
-	for _, kubeServer := range newKubes {
-		cluster := kubeServer.GetCluster()
-		if _, ok := unique[cluster.GetName()]; ok {
-			continue
-		}
-		unique[cluster.GetName()] = struct{}{}
-		resources = append(resources, kubeServer)
-	}
 
-	return resources, nil
+	return newKubes, nil
 }
 
 // getAppServers will get all application servers
 func (c *UnifiedResourceCache) getAppServers(ctx context.Context) ([]types.AppServer, error) {
-	newApps, err := c.GetApplicationServers(ctx, apidefaults.Namespace)
+	newApps, err := c.resourceGetter.GetApplicationServers(ctx, apidefaults.Namespace)
 	if err != nil {
 		return nil, trace.Wrap(err, "getting app servers for unified resource watcher")
 	}
-	unique := map[string]struct{}{}
-	resources := make([]types.AppServer, 0, len(newApps))
-	for _, appServer := range newApps {
-		app := appServer.GetApp()
-		if _, ok := unique[app.GetName()]; ok {
-			continue
-		}
-		unique[app.GetName()] = struct{}{}
-		resources = append(resources, appServer)
-	}
-
-	return resources, nil
+	return newApps, nil
 }
 
 // getDesktops will get all windows desktops
 func (c *UnifiedResourceCache) getDesktops(ctx context.Context) ([]types.WindowsDesktop, error) {
-	newDesktops, err := c.GetWindowsDesktops(ctx, types.WindowsDesktopFilter{})
+	newDesktops, err := c.resourceGetter.GetWindowsDesktops(ctx, types.WindowsDesktopFilter{})
 	if err != nil {
 		return nil, trace.Wrap(err, "getting desktops for unified resource watcher")
 	}
@@ -777,7 +676,7 @@ func (c *UnifiedResourceCache) getSAMLApps(ctx context.Context) ([]types.SAMLIdP
 	startKey := ""
 
 	for {
-		resp, nextKey, err := c.ListSAMLIdPServiceProviders(ctx, apidefaults.DefaultChunkSize, startKey)
+		resp, nextKey, err := c.resourceGetter.ListSAMLIdPServiceProviders(ctx, apidefaults.DefaultChunkSize, startKey)
 		if err != nil {
 			return nil, trace.Wrap(err, "getting SAML apps for unified resource watcher")
 		}
@@ -793,36 +692,16 @@ func (c *UnifiedResourceCache) getSAMLApps(ctx context.Context) ([]types.SAMLIdP
 	return newSAMLApps, nil
 }
 
-func (c *UnifiedResourceCache) getIdentityCenterAccounts(ctx context.Context) ([]resource, error) {
-	var accounts []resource
+func (c *UnifiedResourceCache) getIdentityCenterAccounts(ctx context.Context) ([]*identitycenterv1.Account, error) {
+	var accounts []*identitycenterv1.Account
 	var pageRequest pagination.PageRequestToken
 	for {
-		resultsPage, nextPage, err := c.ListIdentityCenterAccounts(ctx, apidefaults.DefaultChunkSize, &pageRequest)
+		resultsPage, nextPage, err := c.resourceGetter.ListIdentityCenterAccounts(ctx, apidefaults.DefaultChunkSize, &pageRequest)
 		if err != nil {
 			return nil, trace.Wrap(err, "getting AWS Identity Center accounts for resource watcher")
 		}
 		for _, a := range resultsPage {
-			accounts = append(accounts, types.Resource153ToUnifiedResource(a))
-		}
-
-		if nextPage == pagination.EndOfList {
-			break
-		}
-		pageRequest.Update(nextPage)
-	}
-	return accounts, nil
-}
-
-func (c *UnifiedResourceCache) getIdentityCenterAccountAssignments(ctx context.Context) ([]resource, error) {
-	var accounts []resource
-	var pageRequest pagination.PageRequestToken
-	for {
-		resultsPage, nextPage, err := c.ListAccountAssignments(ctx, apidefaults.DefaultChunkSize, &pageRequest)
-		if err != nil {
-			return nil, trace.Wrap(err, "getting AWS Identity Center accounts for resource watcher")
-		}
-		for _, a := range resultsPage {
-			accounts = append(accounts, types.Resource153ToUnifiedResource(a))
+			accounts = append(accounts, a.Account)
 		}
 
 		if nextPage == pagination.EndOfList {
@@ -837,7 +716,7 @@ func (c *UnifiedResourceCache) getGitServers(ctx context.Context) (all []types.S
 	var page []types.Server
 	nextToken := ""
 	for {
-		page, nextToken, err = c.ListGitServers(ctx, apidefaults.DefaultChunkSize, nextToken)
+		page, nextToken, err = c.resourceGetter.ListGitServers(ctx, apidefaults.DefaultChunkSize, nextToken)
 		if err != nil {
 			return nil, trace.Wrap(err, "getting Git servers for unified resource watcher")
 		}
@@ -866,14 +745,40 @@ func (c *UnifiedResourceCache) read(ctx context.Context, fn func(cache *UnifiedR
 	ttlCache, err := utils.FnCacheGet(ctx, c.cache, "unified_resources", func(ctx context.Context) (*UnifiedResourceCache, error) {
 		fallbackCache := &UnifiedResourceCache{
 			cfg: c.cfg,
-			nameTree: btree.NewG(c.cfg.BTreeDegree, func(a, b *item) bool {
-				return a.Less(b)
+			itemCache: sortcache.New(sortcache.Config[types.ResourceWithLabels, string]{
+				Indexes: map[string]func(types.ResourceWithLabels) string{
+					"name": func(r types.ResourceWithLabels) string {
+						return unifiedResourceName(r)
+					},
+					"kind": func(r types.ResourceWithLabels) string {
+						return r.GetKind() + "/" + unifiedResourceName(r)
+					},
+					"identifier": func(r types.ResourceWithLabels) string {
+						if h, ok := r.(interface{ GetHostID() string }); ok {
+							return r.GetKind() + "/" + h.GetHostID()
+						}
+
+						return r.GetKind() + "/" + r.GetName()
+					},
+					"health_name": func(r types.ResourceWithLabels) string {
+						var health string
+						if rh, ok := r.(resourceWithHealth); ok {
+							health = rh.GetTargetHealth().Status
+						}
+
+						return health + "/" + unifiedResourceName(r)
+					},
+					"health_kind": func(r types.ResourceWithLabels) string {
+						var health string
+						if rh, ok := r.(resourceWithHealth); ok {
+							health = rh.GetTargetHealth().Status
+						}
+
+						return health + "/" + r.GetKind() + "/" + unifiedResourceName(r)
+					},
+				},
 			}),
-			typeTree: btree.NewG(c.cfg.BTreeDegree, func(a, b *item) bool {
-				return a.Less(b)
-			}),
-			resources:       make(map[string]resource),
-			ResourceGetter:  c.ResourceGetter,
+			resourceGetter:  c.resourceGetter,
 			initializationC: make(chan struct{}),
 		}
 		if err := fallbackCache.getResourcesAndUpdateCurrent(ctx); err != nil {
@@ -941,15 +846,29 @@ func (c *UnifiedResourceCache) processEventsAndUpdateCurrent(ctx context.Context
 
 		switch event.Type {
 		case types.OpDelete:
-			c.deleteLocked(event.Resource)
+			switch r := event.Resource.(type) {
+			case *types.ResourceHeader:
+				switch r.Kind {
+				case types.KindAppServer,
+					types.KindDatabaseServer,
+					types.KindKubeServer,
+					types.KindWindowsDesktop:
+					c.itemCache.Delete("identifier", r.GetKind()+"/"+r.GetMetadata().Description)
+				case types.KindIdentityCenterAccount:
+					c.itemCache.Delete("identifier", types.KindAppServer+"/"+r.GetMetadata().Name)
+				default:
+					c.itemCache.Delete("identifier", r.GetKind()+"/"+r.GetName())
+				}
+			default:
+				c.logger.WarnContext(ctx, "unsupported Resource type", "resource_type", logutils.TypeAttr(r))
+			}
+
 		case types.OpPut:
 			switch r := event.Resource.(type) {
-			case resource:
-				c.putLocked(r)
 			case types.Resource153UnwrapperT[*identitycenterv1.Account]:
-				c.putLocked(types.Resource153ToUnifiedResource(IdentityCenterAccount{Account: r.UnwrapT()}))
-			case types.Resource153UnwrapperT[*identitycenterv1.AccountAssignment]:
-				c.putLocked(types.Resource153ToUnifiedResource(IdentityCenterAccountAssignment{AccountAssignment: r.UnwrapT()}))
+				c.itemCache.Put(IdentityCenterAccountToAppServer(r.UnwrapT()))
+			case types.ResourceWithLabels:
+				c.itemCache.Put(r)
 			default:
 				c.logger.WarnContext(ctx, "unsupported Resource type", "resource_type", logutils.TypeAttr(r))
 			}
@@ -970,7 +889,6 @@ func (c *UnifiedResourceCache) resourceKinds() []types.WatchKind {
 		{Kind: types.KindWindowsDesktop},
 		{Kind: types.KindSAMLIdPServiceProvider},
 		{Kind: types.KindIdentityCenterAccount},
-		{Kind: types.KindIdentityCenterAccountAssignment},
 		{Kind: types.KindGitServer},
 	}
 }
@@ -982,28 +900,9 @@ func (c *UnifiedResourceCache) defineCollectorAsInitialized() {
 	})
 }
 
-// Less is used for Btree operations,
-// returns true if item is less than the other one
-func (i *item) Less(iother btree.Item) bool {
-	switch other := iother.(type) {
-	case *item:
-		return i.Key.Compare(other.Key) < 0
-	default:
-		return false
-	}
-}
-
-type resource interface {
+type resourceWithHealth interface {
 	types.ResourceWithLabels
-	CloneResource() types.ResourceWithLabels
-}
-
-type item struct {
-	// Key is a key of the key value item. This will be different based on which sorting tree
-	// the item is in
-	Key backend.Key
-	// Value will be the resourceKey used in the resources map to get the resource
-	Value string
+	GetTargetHealth() types.TargetHealth
 }
 
 const (
@@ -1013,8 +912,8 @@ const (
 )
 
 // MakePaginatedResource converts a resource into a paginated proto representation.
-func MakePaginatedResource(ctx context.Context, requestType string, r types.ResourceWithLabels, requiresRequest bool) (*proto.PaginatedResource, error) {
-	var protoResource *proto.PaginatedResource
+func MakePaginatedResource(ctx context.Context, requestType string, r types.ResourceWithLabels, requiresRequest bool) (*clientproto.PaginatedResource, error) {
+	var protoResource *clientproto.PaginatedResource
 	resourceKind := requestType
 	if requestType == types.KindUnifiedResource {
 		resourceKind = r.GetKind()
@@ -1034,102 +933,83 @@ func MakePaginatedResource(ctx context.Context, requestType string, r types.Reso
 			return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
 		}
 
-		protoResource = &proto.PaginatedResource{Resource: &proto.PaginatedResource_DatabaseServer{DatabaseServer: database}, RequiresRequest: requiresRequest}
+		protoResource = &clientproto.PaginatedResource{Resource: &clientproto.PaginatedResource_DatabaseServer{DatabaseServer: database}, RequiresRequest: requiresRequest}
 	case types.KindDatabaseService:
 		databaseService, ok := resource.(*types.DatabaseServiceV1)
 		if !ok {
 			return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
 		}
 
-		protoResource = &proto.PaginatedResource{Resource: &proto.PaginatedResource_DatabaseService{DatabaseService: databaseService}, RequiresRequest: requiresRequest}
+		protoResource = &clientproto.PaginatedResource{Resource: &clientproto.PaginatedResource_DatabaseService{DatabaseService: databaseService}, RequiresRequest: requiresRequest}
 	case types.KindAppServer:
 		app, ok := resource.(*types.AppServerV3)
 		if !ok {
 			return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
 		}
 
-		protoResource = &proto.PaginatedResource{Resource: &proto.PaginatedResource_AppServer{AppServer: app}, Logins: logins, RequiresRequest: requiresRequest}
+		protoResource = &clientproto.PaginatedResource{Resource: &clientproto.PaginatedResource_AppServer{AppServer: app}, Logins: logins, RequiresRequest: requiresRequest}
 	case types.KindNode:
 		srv, ok := resource.(*types.ServerV2)
 		if !ok {
 			return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
 		}
 
-		protoResource = &proto.PaginatedResource{Resource: &proto.PaginatedResource_Node{Node: srv}, Logins: logins, RequiresRequest: requiresRequest}
+		protoResource = &clientproto.PaginatedResource{Resource: &clientproto.PaginatedResource_Node{Node: srv}, Logins: logins, RequiresRequest: requiresRequest}
 	case types.KindKubeServer:
 		srv, ok := resource.(*types.KubernetesServerV3)
 		if !ok {
 			return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
 		}
 
-		protoResource = &proto.PaginatedResource{Resource: &proto.PaginatedResource_KubernetesServer{KubernetesServer: srv}, RequiresRequest: requiresRequest}
+		protoResource = &clientproto.PaginatedResource{Resource: &clientproto.PaginatedResource_KubernetesServer{KubernetesServer: srv}, RequiresRequest: requiresRequest}
 	case types.KindWindowsDesktop:
 		desktop, ok := resource.(*types.WindowsDesktopV3)
 		if !ok {
 			return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
 		}
 
-		protoResource = &proto.PaginatedResource{Resource: &proto.PaginatedResource_WindowsDesktop{WindowsDesktop: desktop}, Logins: logins, RequiresRequest: requiresRequest}
+		protoResource = &clientproto.PaginatedResource{Resource: &clientproto.PaginatedResource_WindowsDesktop{WindowsDesktop: desktop}, Logins: logins, RequiresRequest: requiresRequest}
 	case types.KindWindowsDesktopService:
 		desktopService, ok := resource.(*types.WindowsDesktopServiceV3)
 		if !ok {
 			return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
 		}
 
-		protoResource = &proto.PaginatedResource{Resource: &proto.PaginatedResource_WindowsDesktopService{WindowsDesktopService: desktopService}, RequiresRequest: requiresRequest}
+		protoResource = &clientproto.PaginatedResource{Resource: &clientproto.PaginatedResource_WindowsDesktopService{WindowsDesktopService: desktopService}, RequiresRequest: requiresRequest}
 	case types.KindKubernetesCluster:
 		cluster, ok := resource.(*types.KubernetesClusterV3)
 		if !ok {
 			return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
 		}
 
-		protoResource = &proto.PaginatedResource{Resource: &proto.PaginatedResource_KubeCluster{KubeCluster: cluster}, RequiresRequest: requiresRequest}
+		protoResource = &clientproto.PaginatedResource{Resource: &clientproto.PaginatedResource_KubeCluster{KubeCluster: cluster}, RequiresRequest: requiresRequest}
 	case types.KindUserGroup:
 		userGroup, ok := resource.(*types.UserGroupV1)
 		if !ok {
 			return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
 		}
 
-		protoResource = &proto.PaginatedResource{Resource: &proto.PaginatedResource_UserGroup{UserGroup: userGroup}, RequiresRequest: requiresRequest}
+		protoResource = &clientproto.PaginatedResource{Resource: &clientproto.PaginatedResource_UserGroup{UserGroup: userGroup}, RequiresRequest: requiresRequest}
 	case types.KindSAMLIdPServiceProvider:
 		serviceProvider, ok := resource.(*types.SAMLIdPServiceProviderV1)
 		if !ok {
 			return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
 		}
 
-		protoResource = &proto.PaginatedResource{
-			Resource: &proto.PaginatedResource_SAMLIdPServiceProvider{
+		protoResource = &clientproto.PaginatedResource{
+			Resource: &clientproto.PaginatedResource_SAMLIdPServiceProvider{
 				SAMLIdPServiceProvider: serviceProvider,
 			},
 			RequiresRequest: requiresRequest,
 		}
-
-	case types.KindIdentityCenterAccount:
-		var err error
-		protoResource, err = makePaginatedIdentityCenterAccount(resourceKind, resource, requiresRequest)
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-
-	case types.KindIdentityCenterAccountAssignment:
-		unwrapper, ok := resource.(types.Resource153UnwrapperT[IdentityCenterAccountAssignment])
-		if !ok {
-			return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
-		}
-		assignment := unwrapper.UnwrapT()
-		protoResource = &proto.PaginatedResource{
-			Resource:        proto.PackICAccountAssignment(assignment.AccountAssignment),
-			RequiresRequest: requiresRequest,
-		}
-
 	case types.KindGitServer:
 		server, ok := resource.(*types.ServerV2)
 		if !ok {
 			return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
 		}
 
-		protoResource = &proto.PaginatedResource{
-			Resource: &proto.PaginatedResource_GitServer{
+		protoResource = &clientproto.PaginatedResource{
+			Resource: &clientproto.PaginatedResource_GitServer{
 				GitServer: server,
 			},
 			RequiresRequest: requiresRequest,
@@ -1142,63 +1022,9 @@ func MakePaginatedResource(ctx context.Context, requestType string, r types.Reso
 	return protoResource, nil
 }
 
-// makePaginatedIdentityCenterAccount returns a representation of the supplied
-// Identity Center account as an App.
-func makePaginatedIdentityCenterAccount(resourceKind string, resource types.ResourceWithLabels, requiresRequest bool) (*proto.PaginatedResource, error) {
-	unwrapper, ok := resource.(types.Resource153UnwrapperT[IdentityCenterAccount])
-	if !ok {
-		return nil, trace.BadParameter("%s has invalid type %T", resourceKind, resource)
-	}
-	acct := unwrapper.UnwrapT()
-	srcPSs := acct.GetSpec().GetPermissionSetInfo()
-	pss := make([]*types.IdentityCenterPermissionSet, len(srcPSs))
-	for i, ps := range acct.GetSpec().GetPermissionSetInfo() {
-		pss[i] = &types.IdentityCenterPermissionSet{
-			ARN:          ps.Arn,
-			Name:         ps.Name,
-			AssignmentID: ps.AssignmentId,
-		}
-	}
-
-	appServer := &types.AppServerV3{
-		Kind:     types.KindAppServer,
-		Version:  types.V3,
-		Metadata: resource.GetMetadata(),
-		Spec: types.AppServerSpecV3{
-			App: &types.AppV3{
-				Kind:     types.KindApp,
-				SubKind:  types.KindIdentityCenterAccount,
-				Version:  types.V3,
-				Metadata: types.Metadata153ToLegacy(acct.Metadata),
-				Spec: types.AppSpecV3{
-					URI:        acct.Spec.StartUrl,
-					PublicAddr: acct.Spec.StartUrl,
-					AWS: &types.AppAWS{
-						ExternalID: acct.Spec.Id,
-					},
-					IdentityCenter: &types.AppIdentityCenter{
-						AccountID:      acct.Spec.Id,
-						PermissionSets: pss,
-					},
-				},
-			},
-		},
-	}
-	appServer.Metadata.Description = acct.Spec.Name
-
-	protoResource := &proto.PaginatedResource{
-		Resource: &proto.PaginatedResource_AppServer{
-			AppServer: appServer,
-		},
-		RequiresRequest: requiresRequest,
-	}
-
-	return protoResource, nil
-}
-
 // MakePaginatedResources converts a list of resources into a list of paginated proto representations.
-func MakePaginatedResources(ctx context.Context, requestType string, resources []types.ResourceWithLabels, requestableMap map[string]struct{}) ([]*proto.PaginatedResource, error) {
-	paginatedResources := make([]*proto.PaginatedResource, 0, len(resources))
+func MakePaginatedResources(ctx context.Context, requestType string, resources []types.ResourceWithLabels, requestableMap map[string]struct{}) ([]*clientproto.PaginatedResource, error) {
+	paginatedResources := make([]*clientproto.PaginatedResource, 0, len(resources))
 	for _, r := range resources {
 		_, requiresRequest := requestableMap[r.GetName()]
 		protoResource, err := MakePaginatedResource(ctx, requestType, r, requiresRequest)

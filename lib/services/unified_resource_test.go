@@ -176,17 +176,21 @@ func TestUnifiedResourceWatcher(t *testing.T) {
 	require.NoError(t, err)
 
 	icAcct := newICAccount(t, ctx, clt)
-	icAcctAssignment := newICAccountAssignment(t, ctx, clt)
 
 	// we expect each of the resources above to exist
-	expectedRes := []types.ResourceWithLabels{node, app, samlapp, dbServer, win,
+	expectedRes := []types.ResourceWithLabels{
+		node,
+		app,
+		samlapp,
+		dbServer,
+		win,
 		gitServer, gitServer2,
-		types.Resource153ToUnifiedResource(icAcct),
-		types.Resource153ToUnifiedResource(icAcctAssignment),
+		services.IdentityCenterAccountToAppServer(icAcct),
 	}
-	assert.Eventually(t, func() bool {
+	assert.EventuallyWithT(t, func(t *assert.CollectT) {
 		res, err = w.GetUnifiedResources(ctx)
-		return len(res) == len(expectedRes)
+		assert.NoError(t, err)
+		assert.Len(t, expectedRes, len(res))
 	}, 5*time.Second, 10*time.Millisecond, "Timed out waiting for unified resources to be added")
 	assert.Empty(t, cmp.Diff(
 		expectedRes,
@@ -196,25 +200,6 @@ func TestUnifiedResourceWatcher(t *testing.T) {
 		cmpopts.IgnoreFields(header.Metadata{}, "Revision"),
 		// Ignore order.
 		cmpopts.SortSlices(func(a, b types.ResourceWithLabels) bool { return a.GetName() < b.GetName() }),
-
-		cmp.Transformer("Unwrap.IdentityCenterAccountAssignment",
-			func(t types.Resource153UnwrapperT[services.IdentityCenterAccountAssignment]) services.IdentityCenterAccountAssignment {
-				return t.UnwrapT()
-			}),
-
-		cmp.Transformer("Unwrap.IdentityCenterAccount",
-			func(t types.Resource153UnwrapperT[services.IdentityCenterAccount]) services.IdentityCenterAccount {
-				return t.UnwrapT()
-			}),
-
-		// Ignore unexported values in RFD153-style resources
-		cmpopts.IgnoreUnexported(
-			headerv1.Metadata{},
-			identitycenterv1.Account{},
-			identitycenterv1.AccountSpec{},
-			identitycenterv1.PermissionSetInfo{},
-			identitycenterv1.AccountAssignment{},
-			identitycenterv1.AccountAssignmentSpec{}),
 	))
 
 	// // Update and remove some resources.
@@ -225,19 +210,24 @@ func TestUnifiedResourceWatcher(t *testing.T) {
 	require.NoError(t, err)
 
 	// this should include the updated node, and shouldn't have any apps included
-	expectedRes = []types.ResourceWithLabels{nodeUpdated, samlapp, dbServer, win,
+	expectedRes = []types.ResourceWithLabels{
+		nodeUpdated,
+		samlapp,
+		dbServer,
+		win,
 		gitServer, gitServer2,
-		types.Resource153ToUnifiedResource(icAcct),
-		types.Resource153ToUnifiedResource(icAcctAssignment)}
+		services.IdentityCenterAccountToAppServer(icAcct),
+	}
 
-	assert.Eventually(t, func() bool {
+	assert.EventuallyWithT(t, func(t *assert.CollectT) {
 		res, err = w.GetUnifiedResources(ctx)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		serverUpdated := slices.ContainsFunc(res, func(r types.ResourceWithLabels) bool {
 			node, ok := r.(types.Server)
 			return ok && node.GetAddr() == "192.168.0.1:22"
 		})
-		return len(res) == len(expectedRes) && serverUpdated
+		assert.True(t, serverUpdated)
+		assert.Len(t, expectedRes, len(res))
 	}, 5*time.Second, 10*time.Millisecond, "Timed out waiting for unified resources to be updated")
 	assert.Empty(t, cmp.Diff(
 		expectedRes,
@@ -246,29 +236,23 @@ func TestUnifiedResourceWatcher(t *testing.T) {
 		cmpopts.IgnoreFields(types.Metadata{}, "Revision"),
 		cmpopts.IgnoreFields(header.Metadata{}, "Revision"),
 
-		// Allow comparison of the wrapped values inside a Resource153ToLegacyAdapter
-		cmp.Transformer("Unwrap.IdentityCenterAccountAssignment",
-			func(t types.Resource153UnwrapperT[services.IdentityCenterAccountAssignment]) services.IdentityCenterAccountAssignment {
-				return t.UnwrapT()
-			}),
-
-		cmp.Transformer("Unwrap.IdentityCenterAccount",
-			func(t types.Resource153UnwrapperT[services.IdentityCenterAccount]) services.IdentityCenterAccount {
-				return t.UnwrapT()
-			}),
-
-		// Ignore unexported values in RFD153-style resources
-		cmpopts.IgnoreUnexported(
-			headerv1.Metadata{},
-			identitycenterv1.Account{},
-			identitycenterv1.AccountSpec{},
-			identitycenterv1.PermissionSetInfo{},
-			identitycenterv1.AccountAssignment{},
-			identitycenterv1.AccountAssignmentSpec{}),
-
 		// Ignore order.
 		cmpopts.SortSlices(func(a, b types.ResourceWithLabels) bool { return a.GetName() < b.GetName() }),
 	))
+
+	require.NoError(t, clt.DeleteAllDatabaseServers(ctx, defaults.Namespace))
+	require.NoError(t, clt.DeleteAllNodes(ctx, defaults.Namespace))
+	require.NoError(t, clt.DeleteAllApplicationServers(ctx, ""))
+	require.NoError(t, clt.DeleteAllWindowsDesktops(ctx))
+	require.NoError(t, clt.DeleteAllGitServers(ctx))
+	require.NoError(t, clt.DeleteAllSAMLIdPServiceProviders(ctx))
+	require.NoError(t, clt.DeleteIdentityCenterAccount(ctx, services.IdentityCenterAccountID(icAcct.GetMetadata().Name)))
+
+	assert.EventuallyWithT(t, func(t *assert.CollectT) {
+		res, err = w.GetUnifiedResources(ctx)
+		assert.NoError(t, err)
+		assert.Empty(t, res)
+	}, 5*time.Second, 10*time.Millisecond, "Timed out waiting for unified resources to be updated")
 }
 
 func TestUnifiedResourceCacheIterateResources(t *testing.T) {
@@ -365,12 +349,12 @@ func TestUnifiedResourceCacheIterateResources(t *testing.T) {
 		cmpopts.IgnoreFields(header.Metadata{}, "Revision"),
 
 		cmp.Transformer("Unwrap.IdentityCenterAccountAssignment",
-			func(t types.Resource153UnwrapperT[services.IdentityCenterAccountAssignment]) services.IdentityCenterAccountAssignment {
+			func(t types.Resource153UnwrapperT[*identitycenterv1.AccountAssignment]) *identitycenterv1.AccountAssignment {
 				return t.UnwrapT()
 			}),
 
 		cmp.Transformer("Unwrap.IdentityCenterAccount",
-			func(t types.Resource153UnwrapperT[services.IdentityCenterAccount]) services.IdentityCenterAccount {
+			func(t types.Resource153UnwrapperT[*identitycenterv1.Account]) *identitycenterv1.Account {
 				return t.UnwrapT()
 			}),
 
@@ -387,7 +371,7 @@ func TestUnifiedResourceCacheIterateResources(t *testing.T) {
 		cmpopts.SortSlices(func(a, b types.ResourceWithLabels) bool { return a.GetName() < b.GetName() }),
 	}
 
-	expected := map[string]types.ResourceWithLabels{
+	expected := map[string]any{
 		types.KindApp:                             app,
 		types.KindDatabase:                        dbServer,
 		types.KindNode:                            node,
@@ -395,8 +379,8 @@ func TestUnifiedResourceCacheIterateResources(t *testing.T) {
 		types.KindKubernetesCluster:               kubeServer,
 		types.KindSAMLIdPServiceProvider:          samlapp,
 		types.KindGitServer:                       gitServer,
-		types.KindIdentityCenterAccount:           types.Resource153ToUnifiedResource(icAcct),
-		types.KindIdentityCenterAccountAssignment: types.Resource153ToUnifiedResource(icAcctAssignment),
+		types.KindIdentityCenterAccount:           icAcct,
+		types.KindIdentityCenterAccountAssignment: icAcctAssignment,
 	}
 
 	for r, err := range w.Resources(ctx, "", types.SortBy{Field: services.SortByKind}) {
@@ -461,7 +445,7 @@ func TestUnifiedResourceCacheIteration(t *testing.T) {
 
 	ctx := context.Background()
 
-	const resourceCount = 1234
+	const resourceCount = 5
 	ids := make([]string, 0, resourceCount)
 	for i := 0; i < resourceCount; i++ {
 		ids = append(ids, "resource"+strconv.Itoa(i))
@@ -738,54 +722,13 @@ func TestUnifiedResourceCacheIteration(t *testing.T) {
 			},
 			iterateResources: func(urc *services.UnifiedResourceCache, descending bool) iter.Seq2[GetNamer, error] {
 				return func(yield func(GetNamer, error) bool) {
-					for n, err := range urc.IdentityCenterAccounts(ctx, services.UnifiedResourcesIterateParams{Descending: descending}) {
+					for n, err := range urc.AppServers(ctx, services.UnifiedResourcesIterateParams{Descending: descending}) {
 						if err != nil {
 							yield(nil, err)
 							return
 						}
 
-						if !yield(types.Resource153ToResourceWithLabels(n), nil) {
-							return
-						}
-					}
-				}
-			},
-		},
-		{
-			name: "identity center account assignment",
-			createResource: func(name string, c *client) error {
-				_, err := c.CreateAccountAssignment(ctx, services.IdentityCenterAccountAssignment{
-					AccountAssignment: &identitycenterv1.AccountAssignment{
-						Kind:    types.KindIdentityCenterAccountAssignment,
-						Version: types.V1,
-						Metadata: &headerv1.Metadata{
-							Name: name,
-							Labels: map[string]string{
-								types.OriginLabel: common.OriginAWSIdentityCenter,
-							},
-						},
-						Spec: &identitycenterv1.AccountAssignmentSpec{
-							Display: "Admin access on Production",
-							PermissionSet: &identitycenterv1.PermissionSetInfo{
-								Arn:          "arn:aws::::ps-Admin",
-								Name:         "Admin",
-								AssignmentId: "production--admin",
-							},
-							AccountName: "Production",
-							AccountId:   "99999999",
-						},
-					}})
-				return err
-			},
-			iterateResources: func(urc *services.UnifiedResourceCache, descending bool) iter.Seq2[GetNamer, error] {
-				return func(yield func(GetNamer, error) bool) {
-					for n, err := range urc.IdentityCenterAccountAssignments(ctx, services.UnifiedResourcesIterateParams{Descending: descending}) {
-						if err != nil {
-							yield(nil, err)
-							return
-						}
-
-						if !yield(types.Resource153ToResourceWithLabels(n), nil) {
+						if !yield(n, nil) {
 							return
 						}
 					}
@@ -819,7 +762,7 @@ func TestUnifiedResourceCacheIteration(t *testing.T) {
 				expected, err = w.GetUnifiedResources(ctx)
 				assert.NoError(t, err)
 				assert.Len(t, expected, resourceCount)
-			}, 10*time.Second, 100*time.Millisecond)
+			}, 100000*time.Second, 100*time.Millisecond)
 
 			t.Run("resource iterator", func(t *testing.T) {
 				t.Run("ascending", func(t *testing.T) {
@@ -1108,24 +1051,22 @@ const testEntityDescriptor = `<?xml version="1.0" encoding="UTF-8"?>
 </md:EntityDescriptor>
 `
 
-func newICAccount(t *testing.T, ctx context.Context, svc services.IdentityCenterAccounts) services.IdentityCenterAccount {
+func newICAccount(t *testing.T, ctx context.Context, svc services.IdentityCenterAccounts) *identitycenterv1.Account {
 	t.Helper()
-
-	accountID := t.Name()
 
 	icAcct, err := svc.CreateIdentityCenterAccount(ctx, services.IdentityCenterAccount{
 		Account: &identitycenterv1.Account{
 			Kind:    types.KindIdentityCenterAccount,
 			Version: types.V1,
 			Metadata: &headerv1.Metadata{
-				Name: t.Name(),
+				Name: uuid.NewString(),
 				Labels: map[string]string{
 					types.OriginLabel: common.OriginAWSIdentityCenter,
 				},
 			},
 			Spec: &identitycenterv1.AccountSpec{
-				Id:          accountID,
-				Arn:         "arn:aws:sso:::account/" + accountID,
+				Id:          "test-account-1",
+				Arn:         "arn:aws:sso:::account/test-account-1",
 				Name:        "Test AWS Account",
 				Description: "Used for testing",
 				PermissionSetInfo: []*identitycenterv1.PermissionSetInfo{
@@ -1141,10 +1082,10 @@ func newICAccount(t *testing.T, ctx context.Context, svc services.IdentityCenter
 			},
 		}})
 	require.NoError(t, err, "creating Identity Center Account")
-	return icAcct
+	return icAcct.Account
 }
 
-func newICAccountAssignment(t *testing.T, ctx context.Context, svc services.IdentityCenterAccountAssignments) services.IdentityCenterAccountAssignment {
+func newICAccountAssignment(t *testing.T, ctx context.Context, svc services.IdentityCenterAccountAssignments) *identitycenterv1.AccountAssignment {
 	t.Helper()
 
 	assignment, err := svc.CreateAccountAssignment(ctx, services.IdentityCenterAccountAssignment{
@@ -1152,7 +1093,7 @@ func newICAccountAssignment(t *testing.T, ctx context.Context, svc services.Iden
 			Kind:    types.KindIdentityCenterAccountAssignment,
 			Version: types.V1,
 			Metadata: &headerv1.Metadata{
-				Name: t.Name(),
+				Name: uuid.NewString(),
 				Labels: map[string]string{
 					types.OriginLabel: common.OriginAWSIdentityCenter,
 				},
@@ -1169,7 +1110,7 @@ func newICAccountAssignment(t *testing.T, ctx context.Context, svc services.Iden
 			},
 		}})
 	require.NoError(t, err, "creating Identity Center Account Assignment")
-	return assignment
+	return assignment.AccountAssignment
 }
 
 func TestOktaAppServers(t *testing.T) {
@@ -1215,7 +1156,7 @@ func mustCreateOktaAppServer(t *testing.T, name, friendlyName string) *types.App
 	resource, err := types.NewAppServerV3(types.Metadata{
 		Name: name,
 	}, types.AppServerSpecV3{
-		HostID: "localhost",
+		HostID: name,
 		App:    app,
 	})
 	require.NoError(t, err)

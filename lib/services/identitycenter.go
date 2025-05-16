@@ -53,7 +53,7 @@ type IdentityCenterAccount struct {
 }
 
 // CloneResource creates a deep copy of the underlying account resource
-func (a IdentityCenterAccount) CloneResource() types.ClonableResource153 {
+func (a IdentityCenterAccount) CloneResource() IdentityCenterAccount {
 	return IdentityCenterAccount{
 		Account: apiutils.CloneProtoMsg(a.Account),
 	}
@@ -188,7 +188,7 @@ type IdentityCenterAccountAssignment struct {
 }
 
 // CloneResource creates a deep copy of the underlying account resource
-func (a IdentityCenterAccountAssignment) CloneResource() types.ClonableResource153 {
+func (a IdentityCenterAccountAssignment) CloneResource() IdentityCenterAccountAssignment {
 	return IdentityCenterAccountAssignment{
 		AccountAssignment: apiutils.CloneProtoMsg(a.AccountAssignment),
 	}

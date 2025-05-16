@@ -35,7 +35,6 @@ import (
 	"github.com/gravitational/trace"
 	"github.com/jcmturner/gokrb5/v8/config"
 	"github.com/jcmturner/gokrb5/v8/credentials"
-	"github.com/sirupsen/logrus"
 
 	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/lib/auth/windows"
@@ -125,7 +124,7 @@ func NewCommandLineInitializer(config CommandConfig) *CommandLineInitializer {
 		command:            config.Command,
 		certGetter:         config.CertGetter,
 		ldapCertificatePEM: config.LDAPCAPEM,
-		log:                logrus.StandardLogger(),
+		logger:             slog.Default(),
 	}
 	if cmd.command == nil {
 		cmd.command = &execCmd{}
@@ -171,7 +170,7 @@ type CommandLineInitializer struct {
 	certGetter CertGetter
 
 	ldapCertificatePEM string
-	log                logrus.FieldLogger
+	logger             *slog.Logger
 }
 
 // CertGetter is an interface for getting a new cert/key pair along with a CA cert
@@ -289,7 +288,7 @@ func (k *CommandLineInitializer) UseOrCreateCredentials(ctx context.Context) (*c
 	defer func() {
 		err = os.RemoveAll(tmp)
 		if err != nil {
-			k.log.Errorf("failed removing temporary kinit directory: %s", err)
+			k.logger.ErrorContext(ctx, "Failed to remove temporary kinit directory", "error", err)
 		}
 	}()
 

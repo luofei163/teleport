@@ -285,8 +285,10 @@ type CreateIntegrationRequest struct {
 	EnableBidirectionalSync bool `protobuf:"varint,10,opt,name=enable_bidirectional_sync,json=enableBidirectionalSync,proto3" json:"enable_bidirectional_sync,omitempty"`
 	// Enable Okta system log export.
 	EnableSystemLogExport bool `protobuf:"varint,11,opt,name=enable_system_log_export,json=enableSystemLogExport,proto3" json:"enable_system_log_export,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// Whether to assign the builtin okta-requester role to all Okta synced users.
+	AssignDefaultRoles bool `protobuf:"varint,12,opt,name=assign_default_roles,json=assignDefaultRoles,proto3" json:"assign_default_roles,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *CreateIntegrationRequest) Reset() {
@@ -396,6 +398,13 @@ func (x *CreateIntegrationRequest) GetEnableSystemLogExport() bool {
 	return false
 }
 
+func (x *CreateIntegrationRequest) GetAssignDefaultRoles() bool {
+	if x != nil {
+		return x.AssignDefaultRoles
+	}
+	return false
+}
+
 // UpdateIntegrationRequest is the request message for updating an existing Okta integration.
 type UpdateIntegrationRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -417,8 +426,10 @@ type UpdateIntegrationRequest struct {
 	EnableBidirectionalSync bool `protobuf:"varint,10,opt,name=enable_bidirectional_sync,json=enableBidirectionalSync,proto3" json:"enable_bidirectional_sync,omitempty"`
 	// Enable Okta system log export.
 	EnableSystemLogExport bool `protobuf:"varint,11,opt,name=enable_system_log_export,json=enableSystemLogExport,proto3" json:"enable_system_log_export,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// Whether to assign the builtin okta-requester role to all Okta synced users.
+	AssignDefaultRoles bool `protobuf:"varint,12,opt,name=assign_default_roles,json=assignDefaultRoles,proto3" json:"assign_default_roles,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *UpdateIntegrationRequest) Reset() {
@@ -503,6 +514,13 @@ func (x *UpdateIntegrationRequest) GetEnableBidirectionalSync() bool {
 func (x *UpdateIntegrationRequest) GetEnableSystemLogExport() bool {
 	if x != nil {
 		return x.EnableSystemLogExport
+	}
+	return false
+}
+
+func (x *UpdateIntegrationRequest) GetAssignDefaultRoles() bool {
+	if x != nil {
+		return x.AssignDefaultRoles
 	}
 	return false
 }
@@ -1790,7 +1808,7 @@ const file_teleport_okta_v1_okta_service_proto_rawDesc = "" +
 	"\x06groups\x18\x01 \x03(\v2).teleport.okta.v1.GetGroupsResponse.GroupR\x06groups\x1a=\n" +
 	"\x05Group\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
-	"\vdescription\x18\x02 \x01(\tR\vdescription\"\xf0\x04\n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\"\xa2\x05\n" +
 	"\x18CreateIntegrationRequest\x122\n" +
 	"\x15okta_organization_url\x18\x01 \x01(\tR\x13oktaOrganizationUrl\x12M\n" +
 	"\x0fapi_credentials\x18\x02 \x01(\v2$.teleport.okta.v1.OktaAPICredentialsR\x0eapiCredentials\x12\x1d\n" +
@@ -1804,7 +1822,8 @@ const file_teleport_okta_v1_okta_service_proto_rawDesc = "" +
 	"\x10sso_metadata_url\x18\t \x01(\tR\x0essoMetadataUrl\x12:\n" +
 	"\x19enable_bidirectional_sync\x18\n" +
 	" \x01(\bR\x17enableBidirectionalSync\x127\n" +
-	"\x18enable_system_log_export\x18\v \x01(\bR\x15enableSystemLogExport\"\x98\x04\n" +
+	"\x18enable_system_log_export\x18\v \x01(\bR\x15enableSystemLogExport\x120\n" +
+	"\x14assign_default_roles\x18\f \x01(\bR\x12assignDefaultRoles\"\xca\x04\n" +
 	"\x18UpdateIntegrationRequest\x12M\n" +
 	"\x0fapi_credentials\x18\x02 \x01(\v2$.teleport.okta.v1.OktaAPICredentialsR\x0eapiCredentials\x12\x1d\n" +
 	"\n" +
@@ -1815,7 +1834,8 @@ const file_teleport_okta_v1_okta_service_proto_rawDesc = "" +
 	"\x14access_list_settings\x18\a \x01(\v2$.teleport.okta.v1.AccessListSettingsR\x12accessListSettings\x12:\n" +
 	"\x19enable_bidirectional_sync\x18\n" +
 	" \x01(\bR\x17enableBidirectionalSync\x127\n" +
-	"\x18enable_system_log_export\x18\v \x01(\bR\x15enableSystemLogExportJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"\x18enable_system_log_export\x18\v \x01(\bR\x15enableSystemLogExport\x120\n" +
+	"\x14assign_default_roles\x18\f \x01(\bR\x12assignDefaultRolesJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
 	"R\x0freuse_connectorR\x10sso_metadata_url\"\x7f\n" +
 	"\x12AccessListSettings\x12#\n" +
 	"\rgroup_filters\x18\x02 \x03(\tR\fgroupFilters\x12\x1f\n" +

@@ -19,6 +19,7 @@
 package filesessions
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -379,6 +380,55 @@ func (u *upload) removeFiles() error {
 	return trace.NewAggregate(errs...)
 }
 
+func (u *Uploader) uploadEncryptedRecording(ctx context.Context, sessionID session.ID, in io.ReadCloser) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	pipe, errCh := u.cfg.EncryptedRecordingUploader.UploadEncryptedRecording(ctx)
+	buf := bytes.NewBuffer(nil)
+	for i := 0; ; i++ {
+		buf.Reset()
+		header, err := events.ParsePartHeader(in)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				close(pipe)
+				break
+			}
+
+			return trace.Wrap(err)
+		}
+
+		if _, err = buf.Write(header.Bytes()); err != nil {
+			return trace.Wrap(err)
+		}
+
+		reader := io.LimitReader(in, int64(header.PartSize+header.PaddingSize))
+		copied, err := io.Copy(buf, reader)
+		if err != nil && err != io.EOF {
+			return trace.Wrap(err)
+		}
+
+		if copied != int64(header.PartSize+header.PaddingSize) {
+			return trace.Errorf("copied %d bytes of recording part instead of %d", copied, header.PartSize+header.PaddingSize)
+		}
+
+		select {
+		case err := <-errCh:
+			return trace.Wrap(err)
+		case <-ctx.Done():
+			return trace.Wrap(ctx.Err())
+		default:
+			pipe <- &recordingencryptionv1.UploadEncryptedRecordingRequest{
+				Part:      buf.Bytes(),
+				PartIndex: int64(i),
+				SessionId: sessionID.String(),
+			}
+		}
+	}
+
+	return trace.Wrap(<-errCh)
+}
+
 func (u *Uploader) startUpload(ctx context.Context, fileName string) (err error) {
 	sessionID, err := sessionIDFromPath(fileName)
 	if err != nil {
@@ -444,40 +494,9 @@ func (u *Uploader) startUpload(ctx context.Context, fileName string) (err error)
 	}
 
 	if u.cfg.EncryptedRecordingUploader != nil {
-		ctx, cancel := context.WithCancel(ctx)
-
-		pipe, errCh := u.cfg.EncryptedRecordingUploader.UploadEncryptedRecording(ctx)
-		u.wg.Add(1)
-		go func() {
-			defer u.wg.Done()
-			reader := io.LimitReader(sessionFile, events.MinUploadPartSizeBytes)
-
-			buf := make([]byte, events.MinUploadPartSizeBytes)
-			for i := 0; ; i++ {
-				read, err := reader.Read(buf)
-				if err != nil {
-					if err != io.EOF {
-						log.ErrorContext(ctx, "could not read session file", "error", err)
-						cancel()
-						break
-					}
-					close(pipe)
-					return
-				}
-
-				pipe <- &recordingencryptionv1.UploadEncryptedRecordingRequest{
-					Part:      buf[:read],
-					PartIndex: int64(i),
-					SessionId: sessionID.String(),
-				}
-			}
-
-			err := <-errCh
-			if err != nil {
-				log.ErrorContext(ctx, "upload failed", "error", err)
-			}
-		}()
-
+		if err := u.uploadEncryptedRecording(ctx, sessionID, sessionFile); err != nil {
+			return trace.Wrap(err)
+		}
 		return trace.ConvertSystemError(os.Remove(sessionFile.Name()))
 	}
 

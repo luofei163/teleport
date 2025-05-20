@@ -417,7 +417,6 @@ type ServerContext struct {
 	// approvedFileReq is an approved file transfer request that will only be
 	// set when the session's pending file transfer request is approved.
 	approvedFileReq *FileTransferRequest
-	encryptedIO     events.EncryptedIO
 }
 
 // NewServerContext creates a new *ServerContext which is used to pass and
@@ -459,7 +458,6 @@ func NewServerContext(ctx context.Context, parent *sshutils.ConnectionContext, s
 		return nil, trace.BadParameter("server context requires permit for one of ssh access, proxying, or git forwarding to be set (this is a bug)")
 	}
 
-	encryptedIO := auth.NewEncryptedIO(srv.GetAccessPoint(), nil)
 	cancelContext, cancel := context.WithCancel(ctx)
 	child := &ServerContext{
 		ConnectionContext:      parent,
@@ -475,7 +473,6 @@ func NewServerContext(ctx context.Context, parent *sshutils.ConnectionContext, s
 		cancelContext:          cancelContext,
 		cancel:                 cancel,
 		ServerSubKind:          srv.TargetMetadata().ServerSubKind,
-		encryptedIO:            encryptedIO,
 	}
 
 	child.Logger = slog.With(

@@ -31,6 +31,19 @@ import { AppSubKind, PermissionSet } from 'teleport/services/apps';
  * support the health check feature.
  */
 export type ResourceStatus = 'healthy' | 'unhealthy' | 'unknown' | '';
+const resourcesStatuses = new Set<ResourceStatus>([
+  'healthy',
+  'unhealthy',
+  'unknown',
+  '',
+]);
+
+export function isResourceStatus(status: unknown): status is ResourceStatus {
+  return (
+    typeof status === 'string' &&
+    resourcesStatuses.has(status as ResourceStatus)
+  );
+}
 
 export type ResourceTargetHealth = {
   status: ResourceStatus;

@@ -21,6 +21,7 @@ package common
 import (
 	"bytes"
 	"context"
+	headerv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/header/v1"
 	"testing"
 	"time"
 
@@ -123,14 +124,19 @@ func runAutoUpdateCommand(t *testing.T, client *authclient.Client, args []string
 	return &stdoutBuff, err
 }
 
-type mockRolloutClient struct {
+type mockAutoUpdateClient struct {
 	authclient.Client
 	mock.Mock
 }
 
-func (m *mockRolloutClient) GetAutoUpdateAgentRollout(_ context.Context) (*autoupdatepb.AutoUpdateAgentRollout, error) {
+func (m *mockAutoUpdateClient) GetAutoUpdateAgentRollout(_ context.Context) (*autoupdatepb.AutoUpdateAgentRollout, error) {
 	args := m.Called()
 	return args.Get(0).(*autoupdatepb.AutoUpdateAgentRollout), args.Error(1)
+}
+
+func (m *mockAutoUpdateClient) ListAutoUpdateAgentReports(_ context.Context, pageSize int, nextKey string) ([]*autoupdatepb.AutoUpdateAgentReport, string, error) {
+	args := m.Called()
+	return args.Get(0).([]*autoupdatepb.AutoUpdateAgentReport), "", args.Error(1)
 }
 
 func TestAutoUpdateAgentStatusCommand(t *testing.T) {
@@ -285,14 +291,290 @@ prod       Unstarted                     outside_window
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Test setup: create mock client and load fixtures.
-			clt := &mockRolloutClient{}
+			clt := &mockAutoUpdateClient{}
 			clt.On("GetAutoUpdateAgentRollout", mock.Anything).Return(tt.fixture, tt.fixtureErr).Once()
+			clt.On(
+				"ListAutoUpdateAgentReports", mock.Anything, mock.Anything, mock.Anything,
+			).Return(
+				[]*autoupdatepb.AutoUpdateAgentReport{}, trace.NotFound("no report"),
+			).Once()
 
 			// Test execution: run command.
 			output := &bytes.Buffer{}
 			cmd := AutoUpdateCommand{stdout: output}
 			err := cmd.agentsStatusCommand(ctx, clt)
 			require.NoError(t, err)
+
+			// Test validation: check the command output.
+			require.Equal(t, tt.expectedOutput, output.String())
+
+			// Test validation: check that the mock received the expected calls.
+			clt.AssertExpectations(t)
+		})
+	}
+
+}
+
+func TestCountCatchAll(t *testing.T) {
+	countByGroup := map[string]int{
+		"dev":   10,
+		"stage": 25,
+		"prod":  33,
+	}
+	upToDateByGroup := map[string]int{
+		"dev":   5,
+		"stage": 12,
+		"prod":  1,
+	}
+
+	tests := []struct {
+		name             string
+		rollout          *autoupdatepb.AutoUpdateAgentRollout
+		expectedCount    int
+		expectedUpToDate int
+	}{
+		{
+			name: "all group hit",
+			rollout: &autoupdatepb.AutoUpdateAgentRollout{
+				Status: &autoupdatepb.AutoUpdateAgentRolloutStatus{
+					Groups: []*autoupdatepb.AutoUpdateAgentRolloutStatusGroup{
+						{Name: "dev"},
+						{Name: "stage"},
+						{Name: "prod"},
+					},
+				},
+			},
+			expectedCount:    countByGroup["prod"],
+			expectedUpToDate: upToDateByGroup["prod"],
+		},
+		{
+			name: "one group miss",
+			rollout: &autoupdatepb.AutoUpdateAgentRollout{
+				Status: &autoupdatepb.AutoUpdateAgentRolloutStatus{
+					Groups: []*autoupdatepb.AutoUpdateAgentRolloutStatusGroup{
+						{Name: "dev"},
+						{Name: "prod"},
+					},
+				},
+			},
+			expectedCount:    countByGroup["stage"] + countByGroup["prod"],
+			expectedUpToDate: upToDateByGroup["stage"] + upToDateByGroup["prod"],
+		},
+		{
+			name: "only catch-all group hit",
+			rollout: &autoupdatepb.AutoUpdateAgentRollout{
+				Status: &autoupdatepb.AutoUpdateAgentRolloutStatus{
+					Groups: []*autoupdatepb.AutoUpdateAgentRolloutStatusGroup{
+						{Name: "prod"},
+					},
+				},
+			},
+			expectedCount:    countByGroup["dev"] + countByGroup["stage"] + countByGroup["prod"],
+			expectedUpToDate: upToDateByGroup["dev"] + upToDateByGroup["stage"] + upToDateByGroup["prod"],
+		},
+		{
+			name: "no common group",
+			rollout: &autoupdatepb.AutoUpdateAgentRollout{
+				Status: &autoupdatepb.AutoUpdateAgentRolloutStatus{
+					Groups: []*autoupdatepb.AutoUpdateAgentRolloutStatusGroup{
+						{Name: "foobar"},
+					},
+				},
+			},
+			expectedCount:    countByGroup["dev"] + countByGroup["stage"] + countByGroup["prod"],
+			expectedUpToDate: upToDateByGroup["dev"] + upToDateByGroup["stage"] + upToDateByGroup["prod"],
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			count, upToDate := countCatchAll(tt.rollout, countByGroup, upToDateByGroup)
+			require.Equal(t, tt.expectedCount, count)
+			require.Equal(t, tt.expectedUpToDate, upToDate)
+		})
+	}
+}
+
+func TestAutoUpdateAgentReportCommand(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	fewSecondsAgo := now.Add(-5 * time.Second)
+	fewMinutesAgo := now.Add(-5 * time.Minute)
+
+	tests := []struct {
+		name           string
+		fixtures       []*autoupdatepb.AutoUpdateAgentReport
+		fixturesErr    error
+		expectedOutput string
+		expectErr      require.ErrorAssertionFunc
+	}{
+		{
+			name:           "no agent report",
+			fixtures:       nil,
+			fixturesErr:    trace.NotFound("no agent report"),
+			expectedOutput: "No autoupdate_agent_report found.\n",
+			expectErr:      require.Error,
+		},
+		{
+			name: "only expired agent reports",
+			fixtures: []*autoupdatepb.AutoUpdateAgentReport{
+				{
+					Metadata: &headerv1.Metadata{Name: "auth1"},
+					Spec: &autoupdatepb.AutoUpdateAgentReportSpec{
+						Timestamp: timestamppb.New(fewMinutesAgo),
+						Groups: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroup{
+							"dev": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 123},
+									"1.2.4": {Count: 234},
+								},
+							},
+						},
+					},
+				},
+				{
+					Metadata: &headerv1.Metadata{Name: "auth2"},
+					Spec: &autoupdatepb.AutoUpdateAgentReportSpec{
+						Timestamp: timestamppb.New(fewMinutesAgo),
+						Groups: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroup{
+							"dev": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 456},
+									"1.2.4": {Count: 567},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedOutput: "Read 2 reports, but they are expired. If you just (re)deployed the Auth service, you might want to retry after 60 seconds.\n",
+			expectErr:      require.Error,
+		},
+		{
+			name: "valid reports",
+			fixtures: []*autoupdatepb.AutoUpdateAgentReport{
+				{
+					Metadata: &headerv1.Metadata{Name: "auth1"},
+					Spec: &autoupdatepb.AutoUpdateAgentReportSpec{
+						Timestamp: timestamppb.New(fewSecondsAgo),
+						Groups: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroup{
+							"dev": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 123},
+									"1.2.4": {Count: 234},
+								},
+							},
+							"stage": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 123},
+								},
+							},
+						},
+					},
+				},
+				{
+					Metadata: &headerv1.Metadata{Name: "auth2"},
+					Spec: &autoupdatepb.AutoUpdateAgentReportSpec{
+						Timestamp: timestamppb.New(fewSecondsAgo),
+						Groups: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroup{
+							"dev": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 456},
+									"1.2.4": {Count: 567},
+								},
+							},
+							"prod": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 789},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectErr: require.NoError,
+			expectedOutput: `2 autoupdate agent reports aggregated
+
+Agent Version dev  prod stage 
+------------- ---  ---- ----- 
+1.2.3         579  789  123   
+1.2.4         801  0    0     
+`,
+		},
+		{
+			name: "valid reports with omissions",
+			fixtures: []*autoupdatepb.AutoUpdateAgentReport{
+				{
+					Metadata: &headerv1.Metadata{Name: "auth1"},
+					Spec: &autoupdatepb.AutoUpdateAgentReportSpec{
+						Timestamp: timestamppb.New(fewSecondsAgo),
+						Groups: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroup{
+							"dev": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 123},
+									"1.2.4": {Count: 234},
+								},
+							},
+							"stage": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 123},
+								},
+							},
+						},
+						Omitted: []*autoupdatepb.AutoUpdateAgentReportSpecOmitted{
+							{Reason: "agent is too old", Count: 2},
+						},
+					},
+				},
+				{
+					Metadata: &headerv1.Metadata{Name: "auth2"},
+					Spec: &autoupdatepb.AutoUpdateAgentReportSpec{
+						Timestamp: timestamppb.New(fewSecondsAgo),
+						Groups: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroup{
+							"dev": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 456},
+									"1.2.4": {Count: 567},
+								},
+							},
+							"prod": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 789},
+								},
+							},
+						},
+						Omitted: []*autoupdatepb.AutoUpdateAgentReportSpecOmitted{
+							{Reason: "updater is disabled", Count: 5},
+						},
+					},
+				},
+			},
+			expectErr: require.NoError,
+			expectedOutput: `2 autoupdate agent reports aggregated
+
+Agent Version dev  prod stage 
+------------- ---  ---- ----- 
+1.2.3         579  789  123   
+1.2.4         801  0    0     
+
+7 agents were omitted from the reports:
+- 2 omitted because: agent is too old
+- 5 omitted because: updater is disabled
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test setup: create mock client and load fixtures.
+			clt := &mockAutoUpdateClient{}
+			clt.On("ListAutoUpdateAgentReports", mock.Anything, mock.Anything, mock.Anything).Return(tt.fixtures, tt.fixturesErr).Once()
+
+			// Test execution: run command.
+			output := &bytes.Buffer{}
+			cmd := AutoUpdateCommand{stdout: output, now: func() time.Time { return now }}
+			err := cmd.agentsReportCommand(ctx, clt)
+			tt.expectErr(t, err)
 
 			// Test validation: check the command output.
 			require.Equal(t, tt.expectedOutput, output.String())

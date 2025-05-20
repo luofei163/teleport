@@ -2153,8 +2153,8 @@ func (process *TeleportProcess) initAuthService() error {
 			}
 		}
 		streamer, err = events.NewProtoStreamer(events.ProtoStreamerConfig{
-			Uploader:    uploadHandler,
-			EncryptedIO: encryptedIO,
+			Uploader:  uploadHandler,
+			Encrypter: encryptedIO,
 		})
 		if err != nil {
 			return trace.Wrap(err)
@@ -2175,7 +2175,7 @@ func (process *TeleportProcess) initAuthService() error {
 			ServerID:      cfg.HostUUID,
 			UploadHandler: uploadHandler,
 			ExternalLog:   externalLog,
-			EncryptedIO:   encryptedIO,
+			Decrypter:     encryptedIO,
 		}
 		auditServiceConfig.UID, auditServiceConfig.GID, err = adminCreds()
 		if err != nil {

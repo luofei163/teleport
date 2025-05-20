@@ -92,9 +92,8 @@ type Config struct {
 	// value is used to generate the events index.
 	StartTime time.Time
 
-	// EncryptedIO provides data encryption and decryption for recorded
-	// sessions.
-	EncryptedIO events.EncryptedIO
+	// Encrypter wraps the final gzip writer with encryption.
+	Encrypter events.EncryptionWrapper
 }
 
 // New returns a [events.SessionPreparerRecorder]. If session recording is disabled,
@@ -136,7 +135,7 @@ func New(cfg Config) (events.SessionPreparerRecorder, error) {
 			cfg.DataDir, teleport.LogsDir, teleport.ComponentUpload,
 			events.StreamingSessionsDir, cfg.Namespace,
 		)
-		fileStreamer, err := filesessions.NewStreamer(uploadDir, cfg.EncryptedIO)
+		fileStreamer, err := filesessions.NewStreamer(uploadDir, cfg.Encrypter)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}

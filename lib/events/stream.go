@@ -68,8 +68,6 @@ const (
 
 	// ProtoStreamV1 is a version of the binary protocol
 	ProtoStreamV1 = 1
-	// ProtoStreamV2 is a version of the binary protocol
-	ProtoStreamV2 = 2
 
 	// ProtoStreamV2 is a version of the binary protocol
 	ProtoStreamV2 = 2
@@ -131,8 +129,8 @@ type ProtoStreamerConfig struct {
 	ForceFlush chan struct{}
 	// RetryConfig defines how to retry on a failed upload
 	RetryConfig *retryutils.LinearConfig
-	// EncryptedIO provides wrappers for encrypting and decrypting proto streams.
-	EncryptedIO EncryptedIO
+	// Encrypter wraps the final gzip writer with encryption.
+	Encrypter EncryptionWrapper
 }
 
 // CheckAndSetDefaults checks and sets streamer defaults
@@ -159,18 +157,16 @@ func NewProtoStreamer(cfg ProtoStreamerConfig) (*ProtoStreamer, error) {
 		// Min upload bytes + some overhead to prevent buffer growth (gzip writer is not precise)
 		bufferPool: utils.NewBufferSyncPool(cfg.MinUploadBytes + cfg.MinUploadBytes/3),
 		// MaxProtoMessage size + length of the message record
-		slicePool:   utils.NewSliceSyncPool(MaxProtoMessageSizeBytes + ProtoStreamV1RecordHeaderSize),
-		encryptedIO: cfg.EncryptedIO,
+		slicePool: utils.NewSliceSyncPool(MaxProtoMessageSizeBytes + ProtoStreamV1RecordHeaderSize),
 	}, nil
 }
 
 // ProtoStreamer creates protobuf-based streams uploaded to the storage
 // backends, for example S3 or GCS
 type ProtoStreamer struct {
-	cfg         ProtoStreamerConfig
-	bufferPool  *utils.BufferSyncPool
-	slicePool   *utils.SliceSyncPool
-	encryptedIO EncryptedIO
+	cfg        ProtoStreamerConfig
+	bufferPool *utils.BufferSyncPool
+	slicePool  *utils.SliceSyncPool
 }
 
 // CreateAuditStreamForUpload creates audit stream for existing upload,
@@ -185,7 +181,7 @@ func (s *ProtoStreamer) CreateAuditStreamForUpload(ctx context.Context, sid sess
 		ConcurrentUploads: s.cfg.ConcurrentUploads,
 		ForceFlush:        s.cfg.ForceFlush,
 		RetryConfig:       s.cfg.RetryConfig,
-		EncryptedIO:       s.cfg.EncryptedIO,
+		Encrypter:         s.cfg.Encrypter,
 	})
 }
 
@@ -215,7 +211,7 @@ func (s *ProtoStreamer) ResumeAuditStream(ctx context.Context, sid session.ID, u
 		MinUploadBytes: s.cfg.MinUploadBytes,
 		CompletedParts: parts,
 		RetryConfig:    s.cfg.RetryConfig,
-		EncryptedIO:    s.cfg.EncryptedIO,
+		Encrypter:      s.cfg.Encrypter,
 	})
 }
 
@@ -248,8 +244,8 @@ type ProtoStreamConfig struct {
 	ConcurrentUploads int
 	// RetryConfig defines how to retry on a failed upload
 	RetryConfig *retryutils.LinearConfig
-	// EncryptedIO provides wrappers for encrypting and decrypting proto streams.
-	EncryptedIO EncryptedIO
+	// Encrypter wraps the final gzip writer with encryption.
+	Encrypter EncryptionWrapper
 }
 
 // CheckAndSetDefaults checks and sets default values
@@ -344,7 +340,7 @@ func NewProtoStream(cfg ProtoStreamConfig) (*ProtoStream, error) {
 		semUploads:        make(chan struct{}, cfg.ConcurrentUploads),
 		lastPartNumber:    0,
 		retryConfig:       *cfg.RetryConfig,
-		encrypter:         cfg.EncryptedIO,
+		encrypter:         cfg.Encrypter,
 	}
 	if len(cfg.CompletedParts) > 0 {
 		// skip 2 extra parts as a protection from accidental overwrites.

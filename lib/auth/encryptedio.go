@@ -44,22 +44,9 @@ func (e *EncryptedIO) WithEncryption(writer io.WriteCloser) (io.WriteCloser, err
 		return nil, trace.Wrap(err)
 	}
 
-	var recipients []age.Recipient
-	for _, key := range src.GetStatus().EncryptionKeys {
-		recipient, err := age.ParseX25519Recipient(string(key.PublicKey))
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-
-		recipients = append(recipients, recipient)
-	}
-
-	w, err := age.Encrypt(writer, recipients...)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	return w, nil
+	encrypter := NewEncryptionWrapper(src)
+	w, err := encrypter.WithEncryption(writer)
+	return w, trace.Wrap(err)
 }
 
 func (e *EncryptedIO) WithDecryption(reader io.Reader) (io.Reader, error) {
@@ -83,4 +70,39 @@ func (e *EncryptedIO) WithDecryption(reader io.Reader) (io.Reader, error) {
 	}
 
 	return r, nil
+}
+
+type EncryptionWrapper struct {
+	config types.SessionRecordingConfig
+}
+
+var _ events.EncryptionWrapper = (*EncryptionWrapper)(nil)
+
+func NewEncryptionWrapper(sessionRecordingConfig types.SessionRecordingConfig) *EncryptionWrapper {
+	return &EncryptionWrapper{
+		config: sessionRecordingConfig,
+	}
+}
+
+func (s *EncryptionWrapper) WithEncryption(writer io.WriteCloser) (io.WriteCloser, error) {
+	if !s.config.GetEncrypted() {
+		return writer, nil
+	}
+
+	var recipients []age.Recipient
+	for _, key := range s.config.GetStatus().EncryptionKeys {
+		recipient, err := age.ParseX25519Recipient(string(key.PublicKey))
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+
+		recipients = append(recipients, recipient)
+	}
+
+	w, err := age.Encrypt(writer, recipients...)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	return w, nil
 }

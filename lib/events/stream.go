@@ -78,10 +78,20 @@ const (
 	uploaderReservePartErrorMessage = "uploader failed to reserve upload part"
 )
 
-// EncryptedIO provides wrappers for encrypting an io.WriteCloser and decrypting an io.ReadSeeker.
-type EncryptedIO interface {
+// An EncryptionWrapper wraps a given io.WriteCloser with encryption.
+type EncryptionWrapper interface {
 	WithEncryption(io.WriteCloser) (io.WriteCloser, error)
+}
+
+// A DecryptionWrapper wraps a given io.Reader with decryption.
+type DecryptionWrapper interface {
 	WithDecryption(io.Reader) (io.Reader, error)
+}
+
+// EncryptedIO provides IO wrappers for encrypting and decrypting data.
+type EncryptedIO interface {
+	EncryptionWrapper
+	DecryptionWrapper
 }
 
 // ProtoStreamerConfig specifies configuration for the part
@@ -311,6 +321,7 @@ func NewProtoStream(cfg ProtoStreamConfig) (*ProtoStream, error) {
 		semUploads:        make(chan struct{}, cfg.ConcurrentUploads),
 		lastPartNumber:    0,
 		retryConfig:       *cfg.RetryConfig,
+		encrypter:         cfg.EncryptedIO,
 	}
 	if len(cfg.CompletedParts) > 0 {
 		// skip 2 extra parts as a protection from accidental overwrites.
@@ -518,6 +529,8 @@ type sliceWriter struct {
 	emptyHeader [ProtoStreamV1PartHeaderSize]byte
 	// retryConfig  defines how to retry on a failed upload
 	retryConfig retryutils.LinearConfig
+	// encrypter wraps writes with encryption
+	encrypter EncryptionWrapper
 }
 
 func (w *sliceWriter) updateCompletedParts(part StreamPart, lastEventIndex int64) {
@@ -678,9 +691,9 @@ func (w *sliceWriter) newSlice() (*slice, error) {
 	}
 
 	var writer io.WriteCloser = &bufferCloser{Buffer: buffer}
-	if w.proto.cfg.EncryptedIO != nil {
-		// we want to encrypt after compression and wrapping order is outer->inner, so gzip is the outermost layer
-		writer, err = w.proto.cfg.EncryptedIO.WithEncryption(writer)
+	if w.encrypter != nil {
+		// we want to encrypt after compression, so gzip needs to be the outermost layer
+		writer, err = w.encrypter.WithEncryption(writer)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -966,11 +979,11 @@ func (s *slice) recordEvent(event protoEvent) error {
 }
 
 // NewProtoReader returns a new proto reader with slice pool
-func NewProtoReader(r io.Reader, encryptedIO EncryptedIO) (*ProtoReader, error) {
+func NewProtoReader(r io.Reader, decrypter DecryptionWrapper) (*ProtoReader, error) {
 	return &ProtoReader{
-		reader:      r,
-		lastIndex:   -1,
-		encryptedIO: encryptedIO,
+		reader:    r,
+		lastIndex: -1,
+		decrypter: decrypter,
 	}, nil
 }
 
@@ -1005,7 +1018,7 @@ type ProtoReader struct {
 	error        error
 	lastIndex    int64
 	stats        ProtoReaderStats
-	encryptedIO  EncryptedIO
+	decrypter    DecryptionWrapper
 }
 
 // ProtoReaderStats contains some reader statistics
@@ -1121,8 +1134,8 @@ func (r *ProtoReader) Read(ctx context.Context) (apievents.AuditEvent, error) {
 			}
 			r.padding = int64(binary.BigEndian.Uint64(r.sizeBytes[:Int64Size]))
 			reader := r.reader
-			if r.encryptedIO != nil {
-				reader, err = r.encryptedIO.WithDecryption(r.reader)
+			if r.decrypter != nil {
+				reader, err = r.decrypter.WithDecryption(r.reader)
 				if err != nil {
 					return nil, r.setError(trace.Wrap(err))
 				}

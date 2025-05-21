@@ -106,30 +106,39 @@ func (s *Service) CompleteRotation(ctx context.Context, req *recordingencryption
 
 // UploadEncryptedRecording responds to requests to upload recordings that have already been encrypted using the
 // async recording mode.
-func (s *Service) UploadEncryptedRecording(stream grpc.ClientStreamingServer[recordingencryptionv1.UploadEncryptedRecordingRequest, recordingencryptionv1.UploadEncryptedRecordingResponse]) error {
+func (s *Service) UploadEncryptedRecording(stream grpc.ClientStreamingServer[recordingencryptionv1.UploadEncryptedRecordingRequest, recordingencryptionv1.UploadEncryptedRecordingResponse]) (err error) {
 	ctx, cancel := context.WithCancel(stream.Context())
-	defer cancel()
+	defer func() {
+		cancel()
+		if err != nil {
+			s.logger.ErrorContext(ctx, "failed to receive encrypted recording", "error", err)
+		}
+
+		if err := trace.Wrap(stream.SendAndClose(nil)); err != nil {
+			s.logger.ErrorContext(ctx, "failed to signal successful recording upload to client", "error", err)
+		}
+	}()
 
 	pipe, errCh := s.uploader.UploadEncryptedRecording(ctx)
-	defer close(pipe)
 	for {
 		req, err := stream.Recv()
 		if err != nil {
 			if err == io.EOF {
+				close(pipe)
 				break
 			}
-			cancel()
 			return trace.Wrap(err)
 		}
 
-		pipe <- req
+		select {
+		case err := <-errCh:
+			return trace.Wrap(err)
+		case <-ctx.Done():
+			return trace.Wrap(ctx.Err())
+		default:
+			pipe <- req
+		}
 	}
 
-	err, hasErr := <-errCh
-	if hasErr {
-		s.logger.ErrorContext(ctx, "failed to upload encrypted recording", "error", err)
-		return trace.Wrap(err)
-	}
-
-	return nil
+	return trace.Wrap(<-errCh)
 }

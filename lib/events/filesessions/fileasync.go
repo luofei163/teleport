@@ -380,6 +380,8 @@ func (u *upload) removeFiles() error {
 	return trace.NewAggregate(errs...)
 }
 
+var errNotEncrypted = errors.New("recording is not encrypted")
+
 func (u *Uploader) uploadEncryptedRecording(ctx context.Context, sessionID session.ID, in io.ReadCloser) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -398,18 +400,23 @@ func (u *Uploader) uploadEncryptedRecording(ctx context.Context, sessionID sessi
 			return trace.Wrap(err)
 		}
 
+		if header.Flags&events.ProtoStreamFlagEncrypted == 0 {
+			return trace.Wrap(errNotEncrypted)
+		}
+
 		if _, err = buf.Write(header.Bytes()); err != nil {
 			return trace.Wrap(err)
 		}
 
-		reader := io.LimitReader(in, int64(header.PartSize+header.PaddingSize))
+		totalPartSize := int64(header.PartSize + header.PaddingSize)
+		reader := io.LimitReader(in, totalPartSize)
 		copied, err := io.Copy(buf, reader)
 		if err != nil && err != io.EOF {
 			return trace.Wrap(err)
 		}
 
-		if copied != int64(header.PartSize+header.PaddingSize) {
-			return trace.Errorf("copied %d bytes of recording part instead of %d", copied, header.PartSize+header.PaddingSize)
+		if copied != totalPartSize {
+			return trace.Errorf("copied %d bytes of recording part instead of expected %d", copied, totalPartSize)
 		}
 
 		select {
@@ -495,9 +502,18 @@ func (u *Uploader) startUpload(ctx context.Context, fileName string) (err error)
 
 	if u.cfg.EncryptedRecordingUploader != nil {
 		if err := u.uploadEncryptedRecording(ctx, sessionID, sessionFile); err != nil {
-			return trace.Wrap(err)
+			if !errors.Is(err, errNotEncrypted) {
+				return trace.Wrap(err)
+			}
+
+			// if the file isn't encrypted, seek to the beginning and proceed
+			// with per-event upload
+			if _, err := sessionFile.Seek(0, io.SeekStart); err != nil {
+				return trace.Wrap(err)
+			}
+		} else {
+			return trace.ConvertSystemError(os.Remove(sessionFile.Name()))
 		}
-		return trace.ConvertSystemError(os.Remove(sessionFile.Name()))
 	}
 
 	protoReader, err := events.NewProtoReader(sessionFile, nil)

@@ -538,10 +538,11 @@ func (c *Client) dialGRPC(ctx context.Context, addr string) error {
 
 	c.conn = conn
 	c.grpc = AuthServiceClient{
-		AuthServiceClient:            proto.NewAuthServiceClient(c.conn),
-		AuditLogServiceClient:        auditlogpb.NewAuditLogServiceClient(c.conn),
-		UserPreferencesServiceClient: userpreferencespb.NewUserPreferencesServiceClient(c.conn),
-		NotificationServiceClient:    notificationsv1pb.NewNotificationServiceClient(c.conn),
+		AuthServiceClient:                proto.NewAuthServiceClient(c.conn),
+		AuditLogServiceClient:            auditlogpb.NewAuditLogServiceClient(c.conn),
+		UserPreferencesServiceClient:     userpreferencespb.NewUserPreferencesServiceClient(c.conn),
+		NotificationServiceClient:        notificationsv1pb.NewNotificationServiceClient(c.conn),
+		RecordingEncryptionServiceClient: recordingencryptionv1pb.NewRecordingEncryptionServiceClient(c.conn),
 	}
 	c.JoinServiceClient = NewJoinServiceClient(proto.NewJoinServiceClient(c.conn))
 
@@ -2582,7 +2583,8 @@ func (c *Client) StreamSessionEvents(ctx context.Context, sessionID string, star
 	return ch, e
 }
 
-// StreamSessionEvents streams audit events from a given session recording.
+// UploadEncryptedRecording streams encrypted recording parts to the auth
+// server to be saved in long term storage.
 func (c *Client) UploadEncryptedRecording(ctx context.Context) (chan *recordingencryptionv1pb.UploadEncryptedRecordingRequest, chan error) {
 	pipe := make(chan *recordingencryptionv1pb.UploadEncryptedRecordingRequest)
 	errCh := make(chan error)
@@ -2597,13 +2599,12 @@ func (c *Client) UploadEncryptedRecording(ctx context.Context) (chan *recordinge
 			return trace.Wrap(err)
 		}
 
-		var req *recordingencryptionv1pb.UploadEncryptedRecordingRequest
-		moreParts := true
-		for moreParts {
+	Loop:
+		for {
 			select {
-			case req, moreParts = <-pipe:
+			case req, moreParts := <-pipe:
 				if !moreParts {
-					break
+					break Loop
 				}
 
 				if err := stream.Send(req); err != nil {
@@ -2614,7 +2615,8 @@ func (c *Client) UploadEncryptedRecording(ctx context.Context) (chan *recordinge
 			}
 		}
 
-		return nil
+		_, err = stream.CloseAndRecv()
+		return trace.Wrap(err)
 	}()
 
 	return pipe, errCh

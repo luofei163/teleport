@@ -631,22 +631,18 @@ func (l *AuditLog) UploadEncryptedRecording(ctx context.Context) (chan *recordin
 	uploader := l.AuditLogConfig.UploadHandler
 	go func() (err error) {
 		defer func() {
-			if err != nil {
-				l.log.Error("local uploader", "error", err)
-			}
 			errCh <- err
 		}()
 
 		var upload *StreamUpload
 		var parts []StreamPart
-		var req *recordingencryptionpb.UploadEncryptedRecordingRequest
-		moreParts := true
-		for moreParts {
 
+	Loop:
+		for {
 			select {
-			case req, moreParts = <-inputCh:
+			case req, moreParts := <-inputCh:
 				if !moreParts {
-					break
+					break Loop
 				}
 
 				if upload == nil {

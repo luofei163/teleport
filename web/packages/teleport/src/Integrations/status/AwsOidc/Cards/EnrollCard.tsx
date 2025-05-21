@@ -17,12 +17,19 @@
  */
 
 import { Link as InternalLink } from 'react-router-dom';
-
-import { Box, CardTile, Flex, H2, H3, P2, ResourceIcon } from 'design';
-import * as Icons from 'design/Icon';
+import {
+  Box,
+  CardTile,
+  Flex,
+  H2,
+  H3,
+  P2,
+  ResourceIcon,
+} from 'web/packages/design/src';
+import * as Icons from 'web/packages/design/src/Icon';
 
 import cfg from 'teleport/config';
-import { AwsResource } from 'teleport/Integrations/status/AwsOidc/StatCard';
+import { AwsResource } from 'teleport/Integrations/status/AwsOidc/Cards/StatCard';
 
 export function EnrollCard({
   resource,

@@ -1,6 +1,6 @@
 /**
  * Teleport
- * Copyright (C) 2025 Gravitational, Inc.
+ * Copyright (C) 2023  Gravitational, Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
@@ -16,19 +16,16 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import { AwsResource } from 'teleport/Integrations/status/AwsOidc/Cards/StatCard';
+import { MemoryRouter } from 'react-router';
 
-export function getResourceType(type: string): AwsResource {
-  switch (type) {
-    case 'ec2':
-    case 'discover-ec2':
-      return AwsResource.ec2;
-    case 'eks':
-    case 'discover-eks':
-      return AwsResource.eks;
-    case 'rds':
-    case 'discover-rds':
-    default:
-      return AwsResource.rds;
-  }
-}
+import { AwsConsole } from 'teleport/Integrations/Enroll/AwsConsole/AwsConsole';
+
+export default {
+  title: 'Teleport/Integrations/Enroll/AwsConsole',
+};
+
+export const Flow = () => (
+  <MemoryRouter>
+    <AwsConsole />
+  </MemoryRouter>
+);

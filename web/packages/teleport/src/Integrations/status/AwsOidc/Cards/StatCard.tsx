@@ -24,11 +24,12 @@ import { ResourceIcon } from 'design/ResourceIcon';
 import { SyncStamp } from 'design/SyncStamp/SyncStamp';
 
 import cfg from 'teleport/config';
-import { EnrollCard } from 'teleport/Integrations/status/AwsOidc/EnrollCard';
 import {
   IntegrationKind,
   ResourceTypeSummary,
 } from 'teleport/services/integrations';
+
+import { EnrollCard } from './EnrollCard';
 
 export enum AwsResource {
   ec2 = 'ec2',

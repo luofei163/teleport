@@ -69,6 +69,8 @@ import (
 	notificationsv1pb "github.com/gravitational/teleport/api/gen/proto/go/teleport/notifications/v1"
 	presencev1pb "github.com/gravitational/teleport/api/gen/proto/go/teleport/presence/v1"
 	provisioningv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/provisioning/v1"
+	scopedrolev1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/scopedrole/v1"
+	scopedtokenv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/scopedtoken/v1"
 	stableunixusersv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/stableunixusers/v1"
 	trustv1pb "github.com/gravitational/teleport/api/gen/proto/go/teleport/trust/v1"
 	userloginstatev1pb "github.com/gravitational/teleport/api/gen/proto/go/teleport/userloginstate/v1"
@@ -104,6 +106,7 @@ import (
 	"github.com/gravitational/teleport/lib/auth/machineid/workloadidentityv1"
 	"github.com/gravitational/teleport/lib/auth/notifications/notificationsv1"
 	"github.com/gravitational/teleport/lib/auth/presence/presencev1"
+	"github.com/gravitational/teleport/lib/auth/scopes"
 	"github.com/gravitational/teleport/lib/auth/stableunixusers"
 	"github.com/gravitational/teleport/lib/auth/trust/trustv1"
 	"github.com/gravitational/teleport/lib/auth/userloginstate/userloginstatev1"
@@ -5474,6 +5477,15 @@ func NewGRPCServer(cfg GRPCServerConfig) (*GRPCServer, error) {
 		server,
 		stableUNIXUsersServiceServer,
 	)
+
+	scopesServer, err := scopes.New(scopes.Config{
+		Authorizer: cfg.Authorizer,
+	})
+	if err != nil {
+		return nil, trace.Wrap(err, "creating stable scopes service")
+	}
+	scopedrolev1.RegisterScopedRoleServiceServer(server, scopesServer)
+	scopedtokenv1.RegisterScopedTokenServiceServer(server, scopesServer)
 
 	authServer := &GRPCServer{
 		APIConfig: cfg.APIConfig,

@@ -233,6 +233,8 @@ func (c *AutoUpdateCommand) agentsStatusCommand(ctx context.Context, client auto
 		reports = nil
 	}
 
+	validReports := filterValidReports(reports, c.now())
+
 	sb := strings.Builder{}
 	if rollout.GetSpec() == nil {
 		sb.WriteString("No active agent rollout (autoupdate_agent_rollout).\n")
@@ -260,7 +262,7 @@ func (c *AutoUpdateCommand) agentsStatusCommand(ctx context.Context, client auto
 	}
 
 	sb.WriteRune('\n')
-	rolloutGroupTable(rollout, reports, &sb)
+	rolloutGroupTable(rollout, validReports, &sb)
 
 	fmt.Fprint(c.stdout, sb.String())
 	return nil
@@ -286,12 +288,7 @@ func (c *AutoUpdateCommand) agentsReportCommand(ctx context.Context, client auto
 		return trace.BadParameter("no reports returned, but the server did not return a NotFoundError, this ia a bug")
 	}
 
-	validReports := make([]*autoupdatev1pb.AutoUpdateAgentReport, 0, len(reports))
-	for _, report := range reports {
-		if now.Sub(report.GetSpec().GetTimestamp().AsTime()) <= time.Minute {
-			validReports = append(validReports, report)
-		}
-	}
+	validReports := filterValidReports(reports, now)
 
 	if len(validReports) == 0 {
 		fmt.Fprintf(c.stdout, "Read %d reports, but they are expired. If you just (re)deployed the Auth service, you might want to retry after 60 seconds.\n", len(reports))
@@ -339,6 +336,16 @@ func (c *AutoUpdateCommand) agentsReportCommand(ctx context.Context, client auto
 	fmt.Fprint(c.stdout, c.omittedSummary(validReports))
 
 	return trace.Wrap(err)
+}
+
+func filterValidReports(reports []*autoupdatev1pb.AutoUpdateAgentReport, now time.Time) []*autoupdatev1pb.AutoUpdateAgentReport {
+	validReports := make([]*autoupdatev1pb.AutoUpdateAgentReport, 0, len(reports))
+	for _, report := range reports {
+		if now.Sub(report.GetSpec().GetTimestamp().AsTime()) <= time.Minute {
+			validReports = append(validReports, report)
+		}
+	}
+	return validReports
 }
 
 func (c *AutoUpdateCommand) omittedSummary(reports []*autoupdatev1pb.AutoUpdateAgentReport) string {
@@ -450,7 +457,7 @@ func rolloutGroupTable(rollout *autoupdatev1pb.AutoUpdateAgentRollout, reports [
 			groupCount := countByGroup[groupName]
 			groupUpToDate := upToDateByGroup[groupName]
 			if i == len(groups)-1 {
-				groupName = "* " + groupName
+				groupName = groupName + " (catch-all)"
 				groupCount, groupUpToDate = countCatchAll(rollout, countByGroup, upToDateByGroup)
 			}
 			table.AddRow([]string{

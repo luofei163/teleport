@@ -141,11 +141,15 @@ func (m *mockAutoUpdateClient) ListAutoUpdateAgentReports(_ context.Context, pag
 
 func TestAutoUpdateAgentStatusCommand(t *testing.T) {
 	ctx := context.Background()
+	now := time.Now()
+	fewSecondsAgo := now.Add(-5 * time.Second)
+	fewMinutesAgo := now.Add(-5 * time.Minute)
 
 	tests := []struct {
 		name           string
 		fixture        *autoupdatepb.AutoUpdateAgentRollout
 		fixtureErr     error
+		reportFixtures []*autoupdatepb.AutoUpdateAgentReport
 		expectedOutput string
 	}{
 		{
@@ -286,6 +290,98 @@ stage      Active    2025-01-15 14:00:00 in_window
 prod       Unstarted                     outside_window 
 `,
 		},
+		{
+			name: "rollout regular schedule halt-on-error with progress",
+			fixture: &autoupdatepb.AutoUpdateAgentRollout{
+				Spec: &autoupdatepb.AutoUpdateAgentRolloutSpec{
+					StartVersion:   "1.2.3",
+					TargetVersion:  "1.2.4",
+					Schedule:       autoupdate.AgentsScheduleRegular,
+					AutoupdateMode: autoupdate.AgentsUpdateModeEnabled,
+					Strategy:       autoupdate.AgentsStrategyHaltOnError,
+				},
+				Status: &autoupdatepb.AutoUpdateAgentRolloutStatus{
+					Groups: []*autoupdatepb.AutoUpdateAgentRolloutStatusGroup{
+						{
+							Name:             "dev",
+							StartTime:        timestamppb.New(time.Date(2025, 1, 15, 12, 00, 0, 0, time.UTC)),
+							State:            autoupdatepb.AutoUpdateAgentGroupState_AUTO_UPDATE_AGENT_GROUP_STATE_DONE,
+							LastUpdateTime:   nil,
+							LastUpdateReason: "outside_window",
+							ConfigDays:       []string{"Mon", "Tue", "Wed", "Thu", "Fri"},
+							ConfigStartHour:  8,
+						},
+						{
+							Name:             "stage",
+							StartTime:        timestamppb.New(time.Date(2025, 1, 15, 14, 00, 0, 0, time.UTC)),
+							State:            autoupdatepb.AutoUpdateAgentGroupState_AUTO_UPDATE_AGENT_GROUP_STATE_ACTIVE,
+							LastUpdateReason: "in_window",
+							ConfigDays:       []string{"Mon", "Tue", "Wed", "Thu", "Fri"},
+							ConfigStartHour:  14,
+						},
+						{
+							Name:             "prod",
+							StartTime:        nil,
+							State:            autoupdatepb.AutoUpdateAgentGroupState_AUTO_UPDATE_AGENT_GROUP_STATE_UNSTARTED,
+							LastUpdateReason: "outside_window",
+							ConfigDays:       []string{"Mon", "Tue", "Wed", "Thu", "Fri"},
+							ConfigStartHour:  18,
+						},
+					},
+					State:        autoupdatepb.AutoUpdateAgentRolloutState_AUTO_UPDATE_AGENT_ROLLOUT_STATE_ACTIVE,
+					StartTime:    timestamppb.New(time.Date(2025, 1, 15, 2, 0, 0, 0, time.UTC)),
+					TimeOverride: nil,
+				},
+			},
+			reportFixtures: []*autoupdatepb.AutoUpdateAgentReport{
+				{
+					Metadata: &headerv1.Metadata{Name: "expired-report"},
+					Spec: &autoupdatepb.AutoUpdateAgentReportSpec{
+						Timestamp: timestamppb.New(fewMinutesAgo),
+						Groups: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroup{
+							"dev": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 123},
+									"1.2.4": {Count: 234},
+								},
+							},
+						},
+					},
+				},
+				{
+					Metadata: &headerv1.Metadata{Name: "valid-report"},
+					Spec: &autoupdatepb.AutoUpdateAgentReportSpec{
+						Timestamp: timestamppb.New(fewSecondsAgo),
+						Groups: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroup{
+							"dev": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 456},
+									"1.2.4": {Count: 567},
+								},
+							},
+							"prod": {
+								Versions: map[string]*autoupdatepb.AutoUpdateAgentReportSpecGroupVersion{
+									"1.2.3": {Count: 789},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedOutput: `Agent autoupdate mode: enabled
+Rollout creation date: 2025-01-15 02:00:00
+Start version: 1.2.3
+Target version: 1.2.4
+Rollout state: Active
+Strategy: halt-on-error
+
+Group Name       State     Start Time          State Reason   Agent Count Up-to-date 
+---------------- --------- ------------------- -------------- ----------- ---------- 
+dev              Done      2025-01-15 12:00:00 outside_window 1023        567        
+stage            Active    2025-01-15 14:00:00 in_window      0           0          
+prod (catch-all) Unstarted                     outside_window 789         0          
+`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -296,12 +392,12 @@ prod       Unstarted                     outside_window
 			clt.On(
 				"ListAutoUpdateAgentReports", mock.Anything, mock.Anything, mock.Anything,
 			).Return(
-				[]*autoupdatepb.AutoUpdateAgentReport{}, trace.NotFound("no report"),
+				tt.reportFixtures, nil,
 			).Once()
 
 			// Test execution: run command.
 			output := &bytes.Buffer{}
-			cmd := AutoUpdateCommand{stdout: output}
+			cmd := AutoUpdateCommand{stdout: output, now: func() time.Time { return now }}
 			err := cmd.agentsStatusCommand(ctx, clt)
 			require.NoError(t, err)
 
@@ -396,8 +492,7 @@ func TestCountCatchAll(t *testing.T) {
 
 func TestAutoUpdateAgentReportCommand(t *testing.T) {
 	ctx := context.Background()
-	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
-
+	now := time.Now()
 	fewSecondsAgo := now.Add(-5 * time.Second)
 	fewMinutesAgo := now.Add(-5 * time.Minute)
 

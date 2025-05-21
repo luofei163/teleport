@@ -1,4 +1,3 @@
-;
 /**
  * Teleport
  * Copyright (C) 2023  Gravitational, Inc.
@@ -19,19 +18,13 @@
 
 import React from 'react';
 
-
-
 import { Alert, Box, Flex, Mark, Text } from 'design';
 import FieldInput from 'shared/components/FieldInput';
-
-
+import Validation from 'shared/components/Validation';
 
 import { requiredAwsIdentityCenterRegion } from 'e-teleport/Integrations/IntegrationEnroll/PluginEnroll/MultiStep/AwsIdentityCenter/rules';
-import { Header, StyledBox, StyledBox } from 'teleport/Discover/Shared';
-
-
-
-
+import { Header } from 'teleport/Discover/Shared';
+import { StyledBox } from 'teleport/Discover/Shared/StyledBox';
 
 export function AwsConsole() {
   // const {
@@ -68,22 +61,22 @@ export function AwsConsole() {
           {/*  todo mberg button */}
         </Alert>
       </Box>
-
-      <StyledBox mb={4}>
-        <Text bold>Step 1: Configure AWS Integration</Text>
-        <Text mt={1} mb={4}>
-          AWS IAM Identity Center Region and ARN values can be
-          obtained by navigating to <Mark>Settings &gt; Details</Mark>{' '}
-          in the AWS IAM Identity Center dashboard.
-        </Text>
-        <Flex flexDirection="column" gap={1} mb={4} maxWidth={500}>
-          <FieldInput
-            label="Enter AWS IAM Identity Center instance region"
-            placeholder="ca-central-1"
-            value={'foo'}
-          />
-        </Flex>
-      </StyledBox>
+      <Validation>
+        {({ validator }) => (
+          <StyledBox mb={4}>
+            <Text bold>Step 1: Name your Teleport Integration</Text>
+            <Text mt={1} mb={4}>
+              Give this integration a name.
+            </Text>
+            <Flex flexDirection="column" gap={1} mb={4} maxWidth={500}>
+              <FieldInput
+                label="Integration Name*"
+                placeholder="MyIntegrationName"
+              />
+            </Flex>
+          </StyledBox>
+        )}
+      </Validation>
     </Box>
   );
 }

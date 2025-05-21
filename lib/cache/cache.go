@@ -154,7 +154,6 @@ func ForAuth(cfg Config) Config {
 		{Kind: types.KindAccessRequest},
 		{Kind: types.KindAppServer},
 		{Kind: types.KindApp},
-		{Kind: types.KindWebSession, SubKind: types.KindSAMLIdPSession, LoadSecrets: true},
 		{Kind: types.KindWebSession, SubKind: types.KindSnowflakeSession, LoadSecrets: true},
 		{Kind: types.KindWebSession, SubKind: types.KindAppSession, LoadSecrets: true},
 		{Kind: types.KindWebSession, SubKind: types.KindWebSession, LoadSecrets: true},
@@ -237,7 +236,6 @@ func ForProxy(cfg Config) Config {
 		{Kind: types.KindTunnelConnection},
 		{Kind: types.KindAppServer},
 		{Kind: types.KindApp},
-		{Kind: types.KindWebSession, SubKind: types.KindSAMLIdPSession, LoadSecrets: true},
 		{Kind: types.KindWebSession, SubKind: types.KindSnowflakeSession, LoadSecrets: true},
 		{Kind: types.KindWebSession, SubKind: types.KindAppSession, LoadSecrets: true},
 		{Kind: types.KindWebSession, SubKind: types.KindWebSession, LoadSecrets: true},
@@ -697,8 +695,6 @@ type Config struct {
 	Databases services.Databases
 	// DatabaseObjects is a database object service.
 	DatabaseObjects services.DatabaseObjects
-	// SAMLIdPSession holds SAML IdP sessions.
-	SAMLIdPSession services.SAMLIdPSession
 	// SnowflakeSession holds Snowflake sessions.
 	SnowflakeSession services.SnowflakeSession
 	// AppSession holds application sessions.

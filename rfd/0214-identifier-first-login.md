@@ -15,7 +15,7 @@ Identifier-first login allowing support for mapping SSO providers to users.
 
 ## Why
 
-Currently, every user of a cluster sees a list of all SSO identity providers setup with Teleport on the
+Currently, every user of a cluster sees a list of all SSO identity providers set up with Teleport on the
 login page. This results in unnecessary clutter and potential confusion, as it is likely that
 they can/will only ever use one. Allowing cluster admins to map SSO providers to particular users or groups of users mitigates this by ensuring that a user only sees the identity providers relevant to them.
 
@@ -30,7 +30,7 @@ automatically be shown the auth connector(s) relevant to them.
 ## Details
 
 Identifier-first login will be configured in an auth connector's resource yaml. Any given auth
-connector can be configured with a `user_matchers` field containing a set of RegEx pattern(s) that
+connector can be configured with a `user_matchers` field containing a set of glob pattern(s) that
 can match usernames. When a user visits the login page, they will be prompted to provide a username,
 after which they'll be shown all the auth connectors configured to match it.
 
@@ -47,16 +47,16 @@ explicitly mentioned in the docs.
 #### Match all usernames that end in `@foo.com`
 
 ```yaml
-user_matchers: [".*@foo\.com$"]
+user_matchers: ['*@foo.com']
 ```
 
-### Match `joe@foo.com` and all usernames that end in `@goteleport.com`
+#### Match `joe@foo.com` and all usernames that end in `@goteleport.com`
 
 ```yaml
-user_matchers: ["^joe@foo.com$", ".*@goteleport\.com$"]
+user_matchers: ['joe@foo.com', '*@goteleport.com']
 ```
 
-### Example auth connector configuration:
+#### Example auth connector configuration:
 
 ```yaml
 kind: saml
@@ -79,7 +79,7 @@ spec:
         - access
       value: okta-dev
   audience: https://<cluster-url>/v1/webapi/saml/acs/testconnector
-  user_matchers: ["^joe@foo.com$", ".*@goteleport\.com$"]
+  user_matchers: ['joe@foo.com', '*@goteleport.com']
   cert: ''
   display: Okta
   entity_descriptor: |
@@ -106,15 +106,50 @@ version: v2
 ### Implementation
 
 Upon loading the Web UI, the server returns a web config which contains some details about the cluster
-including the Teleport edition, login methods and auth connectors (stored in `window['GRV_CONFIG']`).
-This will now also include the RegEx matchers per auth connector.
+including the Teleport edition, login methods and auth connectors (stored in `window['GRV_CONFIG']`). This
+config will now also include whether identifier-first login is enabled, which is determined by whether there
+are one or more auth connectors with `user_matchers` explicitly defined.
 
-All matching and filtering will be done on the client side. This is so that we can avoid having to
-introduce any additional calls to the backend once the user has provided a username. This is faster
-and more performant, and also reduces complexity since it means we won't need to add and maintain any new
-endpoints. Remembered usernames will be kept in `localStorage`.
+If identifier-first login is enabled, the login page on the client will prompt for the user to enter their username,
+after which a `POST` request will be made to a new endpoint `/v1/webapi/authconnectors` which will return the list
+of connectors that match the username, if any. If successful, the connectors will be displayed to the client, and
+their email will be remembered in `localStorage`. If there is already a username remembered, the request to get
+matching auth connectors will be done automatically on page load using that username.
 
-#### Proto changes
+##### `POST /v1/webapi/authconnectors`
+
+Purpose: Given a username, return a list of all matching auth connectors based on their `user_matchers` field.
+
+###### Example Request Body
+
+```json
+{
+  "username": "foo@bar.com"
+}
+```
+
+###### Example Response
+
+```json
+{
+  "connectors": [
+    {
+      "name": "okta-connector",
+      "displayName": "Okta",
+      "type": "saml",
+      "url": "/v1/webapi/saml/sso?connector_id=:providerName\u0026redirect_url=:redirect"
+    },
+    {
+      "name": "auth0-connector",
+      "displayName": "Auth0",
+      "type": "oidc",
+      "url": "/v1/webapi/oidc/sso?connector_id=:providerName\u0026redirect_url=:redirect"
+    }
+  ]
+}
+```
+
+##### Proto changes
 
 `SAMLConnectorSpecV2`, `OIDCConnectorSpecV3`, and `GithubConnectorSpecV3` will need to be updated to include the `user_matchers` field.
 
@@ -122,7 +157,7 @@ endpoints. Remembered usernames will be kept in `localStorage`.
 // SAMLConnectorSpecV2 is a SAML connector specification.
 message SAMLConnectorSpecV2 {
   ...
-  // UserMatchers is a set of RegEx patterns to narrow down which username(s) this auth connector should
+  // UserMatchers is a set of glob patterns to narrow down which username(s) this auth connector should
   // match for identifier-first login.
   repeated string UserMatchers = 19 [(gogoproto.jsontag) = "user_matchers,omitempty"]
 }
@@ -135,7 +170,7 @@ message SAMLConnectorSpecV2 {
 // identity provider: https://openid.net/specs/openid-connect-core-1_0.html
 message OIDCConnectorSpecV3 {
  ...
-  // UserMatchers is a set of RegEx patterns to narrow down which username(s) this auth connector should
+  // UserMatchers is a set of glob patterns to narrow down which username(s) this auth connector should
   // match for identifier-first login.
   repeated string UserMatchers = 21 [(gogoproto.jsontag) = "user_matchers,omitempty"]
 }
@@ -145,7 +180,7 @@ message OIDCConnectorSpecV3 {
 // GithubConnectorSpecV3 is a Github connector specification.
 message GithubConnectorSpecV3 {
    ...
-  // UserMatchers is a set of RegEx patterns to narrow down which username(s) this auth connector should
+  // UserMatchers is a set of glob patterns to narrow down which username(s) this auth connector should
   // match for identifier-first login.
   repeated string UserMatchers = 10 [(gogoproto.jsontag) = "user_matchers,omitempty"]
 }
@@ -167,7 +202,8 @@ them based on their `user_matchers` field, and those connectors will be displaye
 only matched to one auth connector, they will be taken directly to that identity provider to log in.
 Their username input will be stored in `localStorage`, so the next time they visit the login page, they
 won't need to enter their username again. If they are matched to no connectors, an error
-message will be displayed.
+message will be displayed. A remembered user can click "not you?" to reset the login page to default
+and clear their username from memory.
 
 If a remembered user only has one connector, they will be shown a single "Log in with <connector-name>"
 button to log in with that connector. If a remembered user has no connectors, which can happen if auth

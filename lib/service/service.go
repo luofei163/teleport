@@ -127,6 +127,7 @@ import (
 	"github.com/gravitational/teleport/lib/events/pgevents"
 	"github.com/gravitational/teleport/lib/events/s3sessions"
 	"github.com/gravitational/teleport/lib/httplib"
+	"github.com/gravitational/teleport/lib/integrations/awsra"
 	"github.com/gravitational/teleport/lib/integrations/externalauditstorage"
 	"github.com/gravitational/teleport/lib/inventory"
 	"github.com/gravitational/teleport/lib/joinserver"
@@ -2591,6 +2592,73 @@ func (process *TeleportProcess) initAuthService() error {
 			logger.ErrorContext(process.GracefulExitContext(), "expiry starting", "error", err)
 		}
 		return trace.Wrap(err)
+	})
+
+	awsRolesAnywhereProfileSyncProcessName := "aws-roles-anywhere.profile-sync"
+	process.RegisterFunc("auth."+awsRolesAnywhereProfileSyncProcessName+".service", func() error {
+		ctx := process.GracefulExitContext()
+		logger := process.logger.With("process", awsRolesAnywhereProfileSyncProcessName)
+
+		// start process only after teleport process has started
+		if _, err := process.WaitForEvent(ctx, TeleportReadyEvent); err != nil {
+			logger.DebugContext(ctx, "process exiting: failed to start AWS Roles Anywhere profile sync service")
+			return nil
+		}
+
+		// TODO(marco): increment this to 5 minutes (similar to discovery service)
+		syncPollInterval := 10 * time.Second
+
+		// TODO(marco): fix me
+		appServerPublicURLGenerator := func(profileName string) (string, error) {
+			if profileName == "MarcoRA-RO-EC2" {
+				return "awsaccess.example.com", nil
+			}
+			return "awsaccess2.example.com", nil
+		}
+
+		params := awsra.AWSRolesAnywherProfileSyncerParams{
+			Logger:               logger,
+			Clock:                process.Clock,
+			HostUUID:             process.Config.HostUUID,
+			SubjectName:          "auth-service_" + process.Config.HostUUID,
+			SyncPollInterval:     syncPollInterval,
+			Cache:                authServer.Cache,
+			KeyStoreManager:      authServer.GetKeyStore(),
+			IntegrationLister:    authServer.Cache,
+			AppServerPublicURLFn: appServerPublicURLGenerator,
+			AppServerUpserter:    authServer.Services,
+		}
+
+		runWhileLockedConfig := backend.RunWhileLockedConfig{
+			LockConfiguration: backend.LockConfiguration{
+				Backend:            process.backend,
+				LockNameComponents: []string{awsRolesAnywhereProfileSyncProcessName},
+				TTL:                1 * time.Minute,
+			},
+			RefreshLockInterval: 20 * time.Second,
+		}
+
+		runFunction := func(ctx context.Context) error {
+			return trace.Wrap(awsra.StartAWSRolesAnywherProfileSyncer(ctx, params))
+		}
+
+		waitWithJitter := retryutils.SeventhJitter(time.Second * 10)
+		for {
+			err := backend.RunWhileLocked(ctx, runWhileLockedConfig, runFunction)
+			if err != nil && ctx.Err() == nil {
+				logger.ErrorContext(
+					ctx,
+					"AWS Roles Anywhere profile syncer encountered a fatal error, it will restart after backoff",
+					"error", err,
+					"restart_after", waitWithJitter,
+				)
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(waitWithJitter):
+			}
+		}
 	})
 
 	// execute this when process is asked to exit:

@@ -106,7 +106,8 @@ import (
 	"github.com/gravitational/teleport/lib/auth/machineid/workloadidentityv1"
 	"github.com/gravitational/teleport/lib/auth/notifications/notificationsv1"
 	"github.com/gravitational/teleport/lib/auth/presence/presencev1"
-	"github.com/gravitational/teleport/lib/auth/scopes"
+	"github.com/gravitational/teleport/lib/auth/scopes/accesscontrol"
+	"github.com/gravitational/teleport/lib/auth/scopes/provisioning"
 	"github.com/gravitational/teleport/lib/auth/stableunixusers"
 	"github.com/gravitational/teleport/lib/auth/trust/trustv1"
 	"github.com/gravitational/teleport/lib/auth/userloginstate/userloginstatev1"
@@ -5478,14 +5479,21 @@ func NewGRPCServer(cfg GRPCServerConfig) (*GRPCServer, error) {
 		stableUNIXUsersServiceServer,
 	)
 
-	scopesServer, err := scopes.New(scopes.Config{
+	scopedAccessControl, err := accesscontrol.New(accesscontrol.Config{
 		Authorizer: cfg.Authorizer,
 	})
 	if err != nil {
-		return nil, trace.Wrap(err, "creating stable scopes service")
+		return nil, trace.Wrap(err, "creating scoped access control service")
 	}
-	scopedrolev1.RegisterScopedRoleServiceServer(server, scopesServer)
-	scopedtokenv1.RegisterScopedTokenServiceServer(server, scopesServer)
+	scopedrolev1.RegisterScopedRoleServiceServer(server, scopedAccessControl)
+
+	scopedProvisioning, err := provisioning.New(provisioning.Config{
+		Authorizer: cfg.Authorizer,
+	})
+	if err != nil {
+		return nil, trace.Wrap(err, "creating scoped provisioning service")
+	}
+	scopedtokenv1.RegisterScopedTokenServiceServer(server, scopedProvisioning)
 
 	authServer := &GRPCServer{
 		APIConfig: cfg.APIConfig,

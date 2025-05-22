@@ -14,19 +14,18 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-package scopes
+package accesscontrol
 
 import (
 	"context"
 	"log/slog"
 
+	scopedrolev1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/scopedrole/v1"
+	"github.com/gravitational/teleport/api/types"
+
 	"github.com/gravitational/trace"
 
 	"github.com/gravitational/teleport"
-
-	scopedrolev1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/scopedrole/v1"
-	scopedtokenv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/scopedtoken/v1"
-	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/lib/authz"
 )
 
@@ -36,11 +35,9 @@ type Config struct {
 	Logger     *slog.Logger
 }
 
-// Server is the [scopedrolev1.ScopedRoleServiceServer] and
-// [scopedtokenv1.ScopedTokenServiceServer] returned by [New].
+// Server is the [scopedrolev1.ScopedRoleServiceServer] returned by [New].
 type Server struct {
 	scopedrolev1.UnsafeScopedRoleServiceServer
-	scopedtokenv1.UnsafeScopedTokenServiceServer
 
 	authorizer authz.Authorizer
 	logger     *slog.Logger
@@ -60,81 +57,6 @@ func New(c Config) (*Server, error) {
 		authorizer: c.Authorizer,
 		logger:     c.Logger,
 	}, nil
-}
-
-// CreateScopedToken implements [scopedtokenv1.ScopedTokenServiceServer].
-func (s *Server) CreateScopedToken(ctx context.Context, req *scopedtokenv1.CreateScopedTokenRequest) (*scopedtokenv1.CreateScopedTokenResponse, error) {
-	authzContext, err := s.authorizer.Authorize(ctx)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	if !authz.HasBuiltinRole(*authzContext, string(types.RoleAdmin)) {
-		s.logger.WarnContext(ctx, "user does not have permission to create scoped tokens", "user", authzContext.User.GetName())
-		return nil, trace.AccessDenied("user %q does not have permission to create scoped tokens", authzContext.User.GetName())
-	}
-
-	return (scopedtokenv1.UnimplementedScopedTokenServiceServer{}).CreateScopedToken(ctx, req)
-}
-
-// DeleteScopedToken implements [scopedtokenv1.ScopedTokenServiceServer].
-func (s *Server) DeleteScopedToken(ctx context.Context, req *scopedtokenv1.DeleteScopedTokenRequest) (*scopedtokenv1.DeleteScopedTokenResponse, error) {
-	authzContext, err := s.authorizer.Authorize(ctx)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	if !authz.HasBuiltinRole(*authzContext, string(types.RoleAdmin)) {
-		s.logger.WarnContext(ctx, "user does not have permission to delete scoped tokens", "user", authzContext.User.GetName())
-		return nil, trace.AccessDenied("user %q does not have permission to delete scoped tokens", authzContext.User.GetName())
-	}
-
-	return (scopedtokenv1.UnimplementedScopedTokenServiceServer{}).DeleteScopedToken(ctx, req)
-}
-
-// GetScopedToken implements [scopedtokenv1.ScopedTokenServiceServer].
-func (s *Server) GetScopedToken(ctx context.Context, req *scopedtokenv1.GetScopedTokenRequest) (*scopedtokenv1.GetScopedTokenResponse, error) {
-	authzContext, err := s.authorizer.Authorize(ctx)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	if !authz.HasBuiltinRole(*authzContext, string(types.RoleAdmin)) {
-		s.logger.WarnContext(ctx, "user does not have permission to get scoped tokens", "user", authzContext.User.GetName())
-		return nil, trace.AccessDenied("user %q does not have permission to get scoped tokens", authzContext.User.GetName())
-	}
-
-	return (scopedtokenv1.UnimplementedScopedTokenServiceServer{}).GetScopedToken(ctx, req)
-}
-
-// ListScopedTokens implements [scopedtokenv1.ScopedTokenServiceServer].
-func (s *Server) ListScopedTokens(ctx context.Context, req *scopedtokenv1.ListScopedTokensRequest) (*scopedtokenv1.ListScopedTokensResponse, error) {
-	authzContext, err := s.authorizer.Authorize(ctx)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	if !authz.HasBuiltinRole(*authzContext, string(types.RoleAdmin)) {
-		s.logger.WarnContext(ctx, "user does not have permission to list scoped tokens", "user", authzContext.User.GetName())
-		return nil, trace.AccessDenied("user %q does not have permission to list scoped tokens", authzContext.User.GetName())
-	}
-
-	return (scopedtokenv1.UnimplementedScopedTokenServiceServer{}).ListScopedTokens(ctx, req)
-}
-
-// UpdateScopedToken implements [scopedtokenv1.ScopedTokenServiceServer].
-func (s *Server) UpdateScopedToken(ctx context.Context, req *scopedtokenv1.UpdateScopedTokenRequest) (*scopedtokenv1.UpdateScopedTokenResponse, error) {
-	authzContext, err := s.authorizer.Authorize(ctx)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	if !authz.HasBuiltinRole(*authzContext, string(types.RoleAdmin)) {
-		s.logger.WarnContext(ctx, "user does not have permission to update scoped tokens", "user", authzContext.User.GetName())
-		return nil, trace.AccessDenied("user %q does not have permission to update scoped tokens", authzContext.User.GetName())
-	}
-
-	return (scopedtokenv1.UnimplementedScopedTokenServiceServer{}).UpdateScopedToken(ctx, req)
 }
 
 // CreateScopedRole implements [scopedrolev1.ScopedRoleServiceServer].

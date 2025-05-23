@@ -204,7 +204,7 @@ func TestRoleParse(t *testing.T) {
 					}
 				}`,
 			error:        trace.BadParameter(""),
-			matchMessage: "invalid or unsupported",
+			matchMessage: "kind \"abcd\" is not supported in role version \"v6\"",
 		},
 		{
 			name: "validation error, kubernetes_resources kind namespace not supported in v6",

@@ -3391,13 +3391,66 @@ func (set RoleSet) GetAllowedSearchAsRoles(allowFilters ...SearchAsRolesOption) 
 	return apiutils.Deduplicate(allowed)
 }
 
+type gk struct{ group, kind string }
+
+// noramlize the give kube kind. Maps legacy values to plural+group, trim the kube: prefix.
+// Returns <kind>[.<group>].
+// NOTE: When dealing with the new format, expect the `kube:<kind>.<group>` format
+// as sent by the client (no ns: nor cw:).
+func normalizeKubernetesKind(in string) (out gk) {
+	// Check if we have a legacy kind.
+	out.group = types.KubernetesResourcesV7KindGroups[in]
+	out.kind = types.KubernetesResourcesKindsPlurals[in]
+	if out.kind == "" {
+		out.kind = strings.TrimPrefix(in, types.PrefixKindKube)
+	}
+	if out.group != "" { // If we have a group, we are dealing with legacy value, we have the noramlized version.
+		return out
+	}
+
+	// Otherwise, parse the group from the trimmed input.
+	if i := strings.Index(out.kind, "."); i != -1 {
+		out.group = out.kind[i+1:]
+		out.kind = out.kind[:i]
+		return out
+	}
+	return out
+}
+
+func matchRequestKubernetesResources(input gk, reference types.RequestKubernetesResource) bool {
+	// If we have an exact match, we are done.
+	if input.kind == reference.Kind && input.group == reference.APIGroup {
+		return true
+	}
+
+	// If the reference kind is not a wildcard and doesn't match exactly, we reject.
+	if reference.Kind != types.Wildcard && input.kind != reference.Kind {
+		return false
+	}
+
+	// If the reference is a wildcard and the input kube_cluster, we reject.
+	// TODO(@creack): Reconsider this. Keeping existing behavior for now.
+	if reference.Kind == types.Wildcard && input.kind == types.KindKubernetesCluster {
+		return false
+	}
+
+	// If the reference api group is a wildcard or is an exact match, we are done.
+	if reference.APIGroup == types.Wildcard || input.group == reference.APIGroup {
+		return true
+	}
+
+	// Otherwise, attempt to match the api group pattern.
+	ok, err := utils.MatchString(input.group, reference.APIGroup)
+	return ok && err == nil
+}
+
 // GetAllowedSearchAsRolesForKubeResourceKind returns all of the allowed SearchAsRoles
 // that allowed requesting to the requested Kubernetes resource kind.
 func (set RoleSet) GetAllowedSearchAsRolesForKubeResourceKind(requestedKubeResourceKind string) []string {
 	// Return no results if encountering any denies since its globally matched.
 	for _, role := range set {
-		for _, kr := range role.GetAccessRequestConditions(types.Deny).KubernetesResources {
-			if kr.Kind == types.Wildcard || kr.Kind == requestedKubeResourceKind {
+		for _, kr := range role.GetRequestKubernetesResources(types.Deny) {
+			if matchRequestKubernetesResources(normalizeKubernetesKind(requestedKubeResourceKind), kr) {
 				return nil
 			}
 		}
@@ -3411,12 +3464,12 @@ func (set RoleSet) GetAllowedSearchAsRolesForKubeResourceKind(requestedKubeResou
 func WithAllowedKubernetesResourceKindFilter(requestedKubeResourceKind string) SearchAsRolesOption {
 	return func(role types.Role) bool {
 		allowed := role.GetAccessRequestConditions(types.Allow).KubernetesResources
-		// any kind is allowed if nothing was configured.
+		// Any kind is allowed if nothing was configured.
 		if len(allowed) == 0 {
 			return true
 		}
-		for _, kr := range role.GetAccessRequestConditions(types.Allow).KubernetesResources {
-			if kr.Kind == types.Wildcard || kr.Kind == requestedKubeResourceKind {
+		for _, kr := range role.GetRequestKubernetesResources(types.Allow) {
+			if matchRequestKubernetesResources(normalizeKubernetesKind(requestedKubeResourceKind), kr) {
 				return true
 			}
 		}
